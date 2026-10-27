@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Importer Harness</title>
+<style>
+  body { margin: 0; font: 14px/1.4 sans-serif; background: #fafafa; color: #222; display: flex; min-height: 100vh; }
+  /* A stand-in for the Streamline dock: icons only until you hover, then labels too. */
+  #dock { width: 52px; background: #b3262b; color: #fff; padding: 8px 0; overflow: hidden; transition: width .15s; flex-shrink: 0; }
+  #dock:hover { width: 180px; }
+  #dock-menu { list-style: none; margin: 0; padding: 0; }
+  #dock-menu .dock-group { border-bottom: 1px solid rgba(0,0,0,.25); padding: 4px 0; }
+  #dock-menu a.dock-link { display: flex; align-items: center; gap: 12px; padding: 8px 10px; color: #fff; text-decoration: none; white-space: nowrap; font: 15px/1.2 Lato, sans-serif; }
+  #dock-menu a.dock-link:hover, #dock-menu a.dock-link.active { background: #5a5a5a; }
+  #dock-menu .dock-icon { width: 32px; height: 32px; flex-shrink: 0; color: #fff; }
+  #dock-menu .dock-label { opacity: 0; transition: opacity .15s; }
+  #dock:hover .dock-label { opacity: 1; }
+  main { flex: 1; padding: 16px 24px; }
+  pre { background: #fff; border: 1px solid #ddd; padding: 10px; max-height: 70vh; overflow: auto; }
+  .bar button { margin-right: 6px; }
+</style>
+</head>
+<body>
+<dock id="dock"><ul id="dock-menu">
+  <li class="dock-group"><a class="dock-link" href="#home"><svg class="dock-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="8"/></svg><span class="dock-label">My Streamline</span></a></li>
+  <li class="dock-group"><a class="dock-link" href="#menus"><svg class="dock-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M4 6h16M4 12h16M4 18h16"/></svg><span class="dock-label">Menus</span></a></li>
+  <li class="dock-group"><a class="dock-link active" href="#content"><svg class="dock-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 7h7l2 2h9v10H3z"/></svg><span class="dock-label">Content</span></a></li>
+  <li class="dock-group"><a class="dock-link" href="#prefs"><svg class="dock-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="3"/><circle cx="12" cy="12" r="8" stroke-dasharray="3 2"/></svg><span class="dock-label">Preferences</span></a></li>
+  <li class="dock-group"><a class="dock-link" href="#support" id="nav-support"><svg class="dock-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M9 9a3 3 0 1 1 4 2.8c-.7.4-1 1-1 1.7V15M12 19h.01"/></svg><span class="dock-label">Support</span></a></li>
+  <li class="dock-group"><a class="dock-link" href="#signout"><svg class="dock-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M14 4h5v16h-5M10 8l-4 4 4 4M6 12h10"/></svg><span class="dock-label">Sign Out</span></a></li>
+</ul></dock>
+<main>
+  <h1>Importer harness (fake CMS, nothing leaves this page)</h1>
+  <div class="bar">
+    <button id="seed">Seed 2 existing menu items</button>
+    <button id="fail">Fail the next 1 write with 500 x5</button>
+    <button id="reject">Reject the next write with 422</button>
+    <button id="reset">Reset fake CMS</button>
+  </div>
+  <p id="counts"></p>
+  <pre id="tree"></pre>
+</main>
+<script>
+// In-memory stand-in for the Streamline endpoints the importer calls.
+// The real fetch, kept for loading sample files; the importer only ever sees the fake one.
+const fetch_ = window.fetch.bind(window);
+(function () {
+  const cms = window.fakeCms = { seq: 100, pages: new Map(), items: new Map(), sections: new Map(), media: new Map(), fail500: 0, reject422: 0, calls: [] };
+  // An existing published page, so the importer can work out the page URL pattern.
+  const seedHome = () => cms.pages.set('home', { id: 'home', title: 'Welcome Home', slug: 'welcome-home', promoted: true, existing: true, createdAt: '2020-01-01T00:00:00Z' });
+  seedHome();
+  const json = (status, body) => new Response(body == null ? '' : JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
+  const isWrite = (method, path, q) => method !== 'GET' && !(path === '/api/graphql' && !/^\s*mutation/.test(q || ''));
+  window.fetch = async (path, opts) => {
+    const method = (opts && opts.method) || 'GET';
+    const body = opts && typeof opts.body === 'string' ? JSON.parse(opts.body) : null;
+    cms.calls.push(method + ' ' + path);
+    await new Promise(r => setTimeout(r, 5));
+    if (isWrite(method, path, body && body.query)) {
+      if (cms.fail500 > 0) { cms.fail500--; return json(500, { error: 'fake 500' }); }
+      if (cms.reject422 > 0) { cms.reject422--; return json(422, { error: 'fake validation error' }); }
+    }
+    let r;
+    if (/^https:\/\/fake-s3\//.test(path)) { render(); return new Response('', { status: 200 }); }
+    const page = [...cms.pages.values()].find(p => method === 'GET' && '/' + p.slug === path && p.promoted);
+    if (page) { render(); return new Response('<html><title>' + page.title + ' | Sandbox</title></html>', { status: 200, headers: { 'Content-Type': 'text/html' } }); }
+    if (path === '/api/menus') r = json(200, [{ id: 1, name: 'primary' }, { id: 2, name: 'footer' }]);
+    else if (path === '/api/menu_items' && method === 'GET') r = json(200, [...cms.items.values()]);
+    else if (path === '/api/menu_items' && method === 'POST') { const id = ++cms.seq; const it = Object.assign({}, body, { id }); cms.items.set(id, it); r = json(200, it); }
+    else if (/^\/api\/menu_items\/\d+$/.test(path) && method === 'PUT') { const id = +path.split('/').pop(); if (!cms.items.has(id)) r = json(404, null); else { if (body.deleted) cms.items.delete(id); r = json(200, body); } }
+    else if (/^\/api\/pocs\//.test(path)) {
+      const id = decodeURIComponent(path.split('/').pop()); const p = cms.pages.get(id);
+      if (!p) r = json(404, null); else if (method === 'GET') r = json(200, { id, title: p.title, deleted: false }); else { cms.pages.delete(id); r = json(200, {}); }
+    } else if (path === '/api/graphql') {
+      const q = body.query, v = body.variables || {};
+      if (/amplifyUpsertPage/.test(q)) { const id = 'pg-' + (++cms.seq); const ap = v.i.amplifyPage; const slug = ap.amplifyTitle.toLowerCase().replace(/\W+/g, '-'); cms.pages.set(id, { id, title: ap.amplifyTitle, slug, unpublished: ap.unpublished, promoted: false, createdAt: new Date().toISOString() }); r = json(200, { data: { amplifyUpsertPage: { page: { id, slug } } } }); }
+      else if (/amplifyDraft/.test(q)) r = json(200, { data: { amplifyDraft: { containers: [{ columns: [{ id: 'main-' + v.id, columnType: 'main' }, { id: 'gutter-' + v.id, columnType: 'gutter' }] }] } } });
+      else if (/amplifyUpsertSectionInstance/.test(q)) { const id = 'sec-' + (++cms.seq); cms.sections.set(id, { pageId: v.i.sectionInstance.instanceableId }); r = json(200, { data: { amplifyUpsertSectionInstance: { sectionInstance: { id, name: 'Freeform' } } } }); }
+      else if (/amplifyUpsertFreeformContent/.test(q)) { Object.assign(cms.sections.get(v.i.sectionInstanceId), { html: v.i.html, json: v.i.json }); r = json(200, { data: { amplifyUpsertFreeformContent: { clientMutationId: null } } }); }
+      else if (/createFileUpload/.test(q)) r = json(200, { data: { createFileUpload: { putUrl: 'https://fake-s3/' + encodeURIComponent(v.b), storagePath: 'sp/' + v.b } } });
+      else if (/createImage/.test(q)) { const id = 'img-' + (++cms.seq); cms.media.set(id, { kind: 'image', path: v.p, altText: 'AI alt' }); r = json(200, { data: { createImage: { image: { id, largeUrl: 'https://imgix.fake/' + v.p, altText: 'AI alt' } } } }); }
+      else if (/updateImage/.test(q)) { cms.media.get(v.i.image.id).altText = v.i.image.altText; r = json(200, { data: { updateImage: { image: { id: v.i.image.id, altText: v.i.image.altText } } } }); }
+      else if (/createFile\(/.test(q)) { const id = 'file-' + (++cms.seq); cms.media.set(id, { kind: 'file', path: v.p }); r = json(200, { data: { createFile: { file: { id, friendlyUrl: '/files/' + id + '/' + v.p.split('/').pop() } } } }); }
+      else if (/deleteImage|deleteFile/.test(q)) { cms.media.delete(v.i.id); r = json(200, { data: {} }); }
+      else if (/amplifyPromoteDraft/.test(q)) { const p = cms.pages.get(v.i.draftId); if (p) p.promoted = true; r = json(200, { data: { amplifyPromoteDraft: { clientMutationId: null } } }); }
+      else if (/amplifyPages/.test(q)) r = json(200, { data: { amplifyPages: { nodes: [...cms.pages.values()].filter(p => v.u == null || !!p.unpublished === v.u).map(p => ({ id: p.id, amplifyTitle: p.title, slug: p.slug, unpublished: !!p.unpublished, draftPageVersion: { createdAt: p.createdAt }, activePageVersion: p.promoted ? { createdAt: p.createdAt } : null })), pageInfo: { hasNextPage: false, endCursor: null } } } });
+      else if (/amplifyLayouts/.test(q)) r = json(200, { data: { amplifyLayouts: [{ id: 'home-layout', name: 'Homepage' }, { id: '08ff0b88-28a9-4925-86d1-57eceb5aceca', name: 'InteriorStandard' }] } });
+      else if (/__schema/.test(q)) r = json(200, { data: { __schema: { queryType: { name: 'Query' }, mutationType: { name: 'Mutation' }, types: [
+        { kind: 'SCALAR', name: 'String' },
+        { kind: 'OBJECT', name: 'Query', fields: [{ name: 'amplifyPages', args: [], type: { kind: 'OBJECT', name: 'PageConnection' }, isDeprecated: false }] },
+        { kind: 'OBJECT', name: 'Mutation', fields: [] },
+        { kind: 'OBJECT', name: 'PageConnection', fields: [{ name: 'pageInfo', args: [], type: { kind: 'OBJECT', name: 'PageInfo' }, isDeprecated: false }] }
+      ] } } });
+      else r = json(200, { errors: [{ message: 'fake CMS does not know this query' }] });
+    } else r = json(404, null);
+    render();
+    return r;
+  };
+  function render() {
+    const items = [...cms.items.values()];
+    const kids = pid => items.filter(i => (i.parent_id == null ? null : i.parent_id) === pid).sort((a, b) => a.weight - b.weight);
+    const lines = [];
+    const walk = (pid, d) => kids(pid).forEach(i => { const p = cms.pages.get(i.poc_id); lines.push('  '.repeat(d) + i.title + (p ? '  → page ' + p.id + (p.unpublished ? ' (unpublished)' : '') + (p.promoted ? '' : ' (draft)') : '  → no page')); walk(i.id, d + 1); });
+    walk(null, 0);
+    document.getElementById('tree').textContent = lines.join('\n') || '(primary menu empty)';
+    document.getElementById('counts').textContent = 'Fake CMS: ' + cms.pages.size + ' pages, ' + items.length + ' menu items, ' + cms.sections.size + ' sections, ' + cms.media.size + ' media, ' + cms.calls.length + ' requests';
+  }
+  window.renderFake = render;
+  document.getElementById('seed').onclick = () => { for (const t of ['Existing A', 'Existing B']) { const id = ++cms.seq; cms.items.set(id, { id, title: t, menu_id: 1, parent_id: null, weight: 0, poc_id: null }); } render(); };
+  document.getElementById('fail').onclick = () => { cms.fail500 = 5; };
+  document.getElementById('reject').onclick = () => { cms.reject422 = 1; };
+  document.getElementById('reset').onclick = () => { cms.pages.clear(); cms.items.clear(); cms.sections.clear(); cms.media.clear(); cms.calls = []; seedHome(); render(); };
+  // Stand-in for Tampermonkey's GM_xmlhttpRequest: every old-site file downloads as a small blob.
+  window.GM_xmlhttpRequest = o => setTimeout(() => o.onload({ status: 200, response: new Blob(['fake ' + o.url], { type: /\.(jpe?g|png|gif)$/i.test(o.url) ? 'image/jpeg' : 'application/pdf' }) }), 5);
+  document.cookie = 'XSRF-TOKEN=fake';
+  render();
+})();
+
+// Loads a sample export straight into the importer's folder input (for testing without a file picker).
+window.loadSample = async function (site) {
+  const names = await (await fetch_('/sample/' + site + '/')).json();
+  const files = await Promise.all(names.map(async n => new File([await (await fetch_('/sample/' + site + '/' + n)).text()], n, { type: 'application/json' })));
+  const dt = new DataTransfer();
+  files.forEach(f => dt.items.add(f));
+  const input = document.querySelector('#si-overlay input[type=file][multiple]');
+  input.files = dt.files;
+  input.dispatchEvent(new Event('change'));
+  return files.length;
+};
+</script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script src="../dist/streamline-importer.user.js"></script>
+</body>
+</html>

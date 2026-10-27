@@ -1,0 +1,14 @@
+# Secrets and captures: never commit
+.env
+.env.*
+*.har
+
+# Client data and run output
+data/
+manifests/
+*.xlsx
+*.xlsm
+*.csv
+www-*.json
+
+node_modules/

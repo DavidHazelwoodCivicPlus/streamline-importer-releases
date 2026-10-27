@@ -1,0 +1,16 @@
+{
+  "name": "streamline-importer",
+  "version": "0.3.0",
+  "private": true,
+  "description": "D10 to Streamline CMS importer (Tampermonkey userscript)",
+  "releaseRepo": {
+    "name": "DavidHazelwoodCivicPlus/streamline-importer-releases",
+    "branch": "main"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "build": "node build.js",
+    "harness": "node dev/serve.js",
+    "release": "node scripts/release.js"
+  }
+}
