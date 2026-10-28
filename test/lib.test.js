@@ -114,3 +114,15 @@ test('manifest: stages, host check, round trip', () => {
   assert.throws(() => man.parseManifest('{"format":"x"}'), /not an importer manifest/);
   assert.deepEqual(man.summary(m).pages, 1);
 });
+
+test('FAQ sections are found whether the paragraph is embedded in the page or only in www-paragraphs.json', () => {
+  const { page, microsite } = require('./fixtures');
+  const p1 = page(1, 'A', 10, { fields: { field_sections: [{ target_id: 5 }] } });
+  const para = { entity_id: '5', bundle: 'faqs', fields: { field_faq_category: [{ target_id: 77 }] } };
+  const exp = d10.loadExport([
+    { name: 'www-pages.json', text: JSON.stringify([p1]) },
+    { name: 'www-microsites.json', text: JSON.stringify([microsite(10, 'U', '/u')]) },
+    { name: 'www-paragraphs.json', text: JSON.stringify([para]) }
+  ]);
+  assert.deepEqual(exp.pages[0].faqSections, [{ pid: '5', categoryId: '77', collapsing: '' }]);
+});

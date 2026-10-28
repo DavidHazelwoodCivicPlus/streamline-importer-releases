@@ -1,12 +1,18 @@
 'use strict';
-// Report-only outputs for content this importer does not create yet. Pure.
+// Reports on what the export holds and where it goes. Pure.
 
 const { fieldItems, firstValue, cleanTitle } = require('./d10');
 
-// One row per FAQ group (microsite + category): where the group would go, and its questions in weight order.
+// One row per FAQ group (microsite + category): the D10 pages whose FAQ sections show it (they get accordions
+// in content mode), the microsite it belongs to, and its questions in weight order.
 function faqReport(exp) {
   const faqs = exp.raw.faqs || [];
   const ms = new Map(exp.microsites.map(m => [m.nid, m]));
+  const shownOn = new Map();
+  for (const p of exp.pages.concat(exp.microsites)) for (const sec of p.faqSections || []) {
+    if (!shownOn.has(sec.categoryId)) shownOn.set(sec.categoryId, []);
+    shownOn.get(sec.categoryId).push(p.title + ' (nid ' + p.nid + (p.kind && p.kind !== 'page' ? ', ' + p.kind + ', not imported' : '') + ')');
+  }
   const groups = new Map();
   for (const f of faqs) {
     if (!f || !f.fields) continue;
@@ -25,6 +31,7 @@ function faqReport(exp) {
     return {
       microsite: m ? m.title : (g.msId ? 'microsite ' + g.msId + ' (not in export)' : '(none)'), micrositeNid: g.msId,
       wouldGoOn: m ? m.title + ' (' + m.alias + ')' : '', category: exp.terms[g.catId] || (g.catId ? 'term ' + g.catId : '(none)'),
+      onPages: (shownOn.get(g.catId) || []).join(' | ') || 'none (not shown on any page)',
       count: g.items.length, published: g.items.filter(i => i.published).length,
       questions: g.items.map(i => i.title).join(' | '), nids: g.items.map(i => i.nid).join(' '), oldUrls: g.items.map(i => i.alias).join(' ')
     };
@@ -33,7 +40,7 @@ function faqReport(exp) {
 
 const FAQ_COLUMNS = [
   { key: 'microsite', label: 'Microsite' }, { key: 'micrositeNid', label: 'Microsite nid' }, { key: 'wouldGoOn', label: 'Would go on' },
-  { key: 'category', label: 'FAQ category' }, { key: 'count', label: 'FAQs' }, { key: 'published', label: 'Published' },
+  { key: 'category', label: 'FAQ category' }, { key: 'onPages', label: 'Shown on D10 pages (become accordions)' }, { key: 'count', label: 'FAQs' }, { key: 'published', label: 'Published' },
   { key: 'questions', label: 'Questions (in weight order)' }, { key: 'nids', label: 'FAQ nids' }, { key: 'oldUrls', label: 'Old URLs' }
 ];
 
@@ -45,7 +52,7 @@ function outOfScopeReport(exp) {
     rows.push({ type, records: recs.length, published: recs.filter(r => r && r.is_published === true).length, note });
   };
   const r = exp.raw;
-  count('FAQs', r.faqs, 'Module content. See the FAQ report for where each group would go.');
+  count('FAQs', r.faqs, 'Imported as accordions on the pages whose FAQ sections show them (content mode). FAQs no page shows are not imported; see the FAQ report.');
   count('Meetings', r.meetings, 'Module content (agendas and minutes).');
   count('Directory listings', r.directory_listings, 'Module content.');
   count('Business directory', r.business_directory, 'Module content.');

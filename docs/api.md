@@ -51,7 +51,8 @@ Status of every call the importer makes. "Proven" means a working script already
 | `createImage(input: {storagePath, mediaType: Image})` → `image {id largeUrl altText}` | images (the CMS writes its own alt text) | HAR, Schema |
 | `updateImage(input: {image: {id, altText}})` | replace the generated alt text with D10's | Schema |
 | `deleteFile` / `deleteImage(input: {id})` | undo | Schema |
-| `GET /<slug>` (same origin) | work out the page URL pattern from an existing published page | Not an API; checked per run |
+| `amplifyUpdatePreferencesFreeform(input: {sectionInstanceId, preferences: {colorIndex, padding, highContrast, accordion, accordionTitle}})` | FAQ accordions | Sandbox (2026-10-28): renders as an accordion, the title is the question |
+| `GET /api/pocs/{id}` → `url` | a page's public address for links between pages (e.g. `/boil-water-order-faqs`) | Sandbox (2026-10-28) |
 
 ## Freeform JSON node shapes
 
@@ -64,6 +65,10 @@ Status of every call the importer makes. "Proven" means a working script already
 | `<hr>`, `<iframe>`, `<script>`, `<svg>`, forms | Dropped and reported |
 
 The `html` sent with the json is rendered from the same tree, so the two always agree.
+
+## Layout limits (sandbox, 2026-10-28)
+
+On all four layouts (InteriorStandard, InteriorRoomToBreath, InteriorNoNavigation, InteriorLandingPage) the right column (`gutter`) accepts only `Teasers`. Freeform, HtmlEmbed and the rest are main-column only (`amplifyDraft` → `columns { columnType supportedSections }`). So right-column content from D10 cannot be recreated; FAQs go in the main column.
 
 ## Export quirks found
 

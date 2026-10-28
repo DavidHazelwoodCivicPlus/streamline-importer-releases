@@ -46,6 +46,8 @@ The releases repo is public. It gets every tracked file except the Streamline AP
 
 - The D10 body is converted to Streamline's freeform format (Lexical JSON + HTML): paragraphs, h2-h6, bold/italic/underline/strike, links, nested lists, tables, line breaks. Spans and styling are cleaned up. Scripts, iframes, rules and forms are dropped and reported.
 - File attachments become a "Documents" list at the end of the page.
+- D10 FAQ sections become one accordion per published question (question as the title, answer inside), in D10's order, under the page body. Streamline's right column only takes link cards (Teasers) on every layout, so FAQs go in the main column. Turn this off with the FAQ option.
+- Links to other imported pages use each page's address as the CMS reports it (`GET /api/pocs/{id}` → `url`). A "Page URL pattern" in Options overrides that.
 - Links to imported pages and uploaded files point at the new site. Links to anything not imported keep pointing at the old site and are listed in the links report with the reason.
 
 ## Develop

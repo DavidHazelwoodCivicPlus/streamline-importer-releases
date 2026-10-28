@@ -11,7 +11,7 @@
 const man = require('./lib/manifest');
 const { INTERIOR_STANDARD_LAYOUT_ID } = require('./api/streamline');
 const { RUN_LOCKED } = require('./lib/plan');
-const { buildPageContent } = require('./lib/content');
+const { buildPageContent, linkedPageKeys } = require('./lib/content');
 
 class StopRequested extends Error { constructor() { super('Stopped by user'); this.name = 'StopRequested'; } }
 
@@ -163,66 +163,79 @@ async function uploadMediaPhase(media, ctx, check, save) {
 
 async function contentPhase(plan, ctx, check, save) {
   const { api, manifest: m, log, idx } = ctx;
-  const pattern = await resolvePageUrlPattern(api, m, plan.options, log);
-  save();
+  const opts = { includeAttachments: plan.options.includeAttachments };
+  await resolvePageUrls(plan, ctx, save);
+  const pattern = plan.options.pageUrlPattern !== 'auto' ? plan.options.pageUrlPattern : null;
   const lookups = {
-    pageUrl: key => (m.pages[key] && m.pages[key].slug != null ? pattern.replace('{slug}', m.pages[key].slug) : null),
+    pageUrl: key => {
+      const r = m.pages[key];
+      if (!r) return null;
+      if (r.url) return r.url;
+      return pattern && r.slug != null ? pattern.replace('{slug}', r.slug) : null;
+    },
     media: mid => (m.media[mid] ? { url: m.media[mid].url, id: m.media[mid].streamlineId, altText: m.media[mid].altText } : null)
   };
-  let written = 0, empty = 0;
+  let written = 0, empty = 0, accordions = 0;
   for (const p of plan.pages) {
     check();
     const rec = m.pages[p.key];
     if (p.content !== 'content' || man.pageStageAtLeast(rec, 'content')) continue;
-    const c = buildPageContent(p, idx, lookups, { includeAttachments: plan.options.includeAttachments });
-    if (c.empty) { man.setPageStage(m, p.key, 'content', { contentEmpty: true }); save(); empty++; continue; }
-    let sectionId = rec.sectionId;
-    if (!sectionId) {
+    const c = buildPageContent(p, idx, lookups, opts);
+    if (c.empty && !c.faqs.length) { man.setPageStage(m, p.key, 'content', { contentEmpty: true }); save(); empty++; continue; }
+
+    // The main column, looked up once per page and only when a section still has to be added.
+    let mainId = null;
+    const main = async () => {
+      if (mainId) return mainId;
       const cols = await api.draftColumns(rec.streamlineId);
-      const main = cols.find(col => col.columnType === 'main');
-      if (!main) throw new Error('Page "' + p.title + '" has no main column (columns: ' + cols.map(col => col.columnType).join(', ') + ')');
-      sectionId = await api.addSection(rec.streamlineId, 'Freeform', main.id, 1);
-      man.setPageStage(m, p.key, 'section', { sectionId });
-      save();
+      const col = cols.find(x => x.columnType === 'main');
+      if (!col) throw new Error('Page "' + p.title + '" has no main column (columns: ' + cols.map(x => x.columnType).join(', ') + ')');
+      return (mainId = col.id);
+    };
+
+    // Body first (weight 1), then one accordion per FAQ, in D10 order. Each section id is saved as soon as it
+    // exists, so a resume fills in the same sections instead of adding new ones.
+    if (!c.empty) {
+      if (!rec.sectionId) {
+        man.setPageStage(m, p.key, 'section', { sectionId: await api.addSection(rec.streamlineId, 'Freeform', await main(), 1) });
+        save();
+      }
+      await api.setFreeform(m.pages[p.key].sectionId, c.html, c.json);
     }
-    await api.setFreeform(sectionId, c.html, c.json);
+    const faqIds = (m.pages[p.key].faqSectionIds || []).slice();
+    for (let i = 0; i < c.faqs.length; i++) {
+      check();
+      const q = c.faqs[i];
+      if (!faqIds[i]) {
+        faqIds[i] = await api.addSection(rec.streamlineId, 'Freeform', await main(), (c.empty ? 1 : 2) + i);
+        man.recordPage(m, p.key, { faqSectionIds: faqIds.slice() });
+        save();
+      }
+      await api.setFreeform(faqIds[i], q.html, q.json);
+      await api.setFreeformPreferences(faqIds[i], { accordion: true, accordionTitle: q.question });
+      accordions++;
+    }
     const oldSite = c.links.filter(l => l.outcome === 'old-site').length;
-    man.setPageStage(m, p.key, 'content', { contentWarnings: c.warnings.length, linksToOldSite: oldSite });
+    man.setPageStage(m, p.key, 'content', { contentWarnings: c.warnings.length, linksToOldSite: oldSite, faqs: c.faqs.length });
     save();
     written++;
     if (written % 25 === 0) log('  … ' + written + ' pages written');
   }
-  log('  ' + written + ' written, ' + empty + ' had no body');
+  log('  ' + written + ' written' + (accordions ? ' (' + accordions + ' FAQ accordions)' : '') + ', ' + empty + ' had no body');
 }
 
-// Page URLs on the new site come from the slug, but the schema has no public URL field. With 'auto', the pattern
-// is worked out by opening existing published pages under each candidate pattern and checking for their title.
-const URL_PATTERNS = ['/{slug}', '/page/{slug}', '/pages/{slug}'];
-async function resolvePageUrlPattern(api, m, options, log) {
-  if (m.pageUrlPattern) return m.pageUrlPattern;
-  if (options.pageUrlPattern && options.pageUrlPattern !== 'auto') {
-    m.pageUrlPattern = options.pageUrlPattern;
-    log('Page URLs: ' + m.pageUrlPattern + ' (from options)');
-    return m.pageUrlPattern;
+// Links between imported pages need each page's address on the new site. The CMS reports it on the page's
+// record (GET /api/pocs/{id} -> url), so it is read from there for every page the content links to, and kept
+// in the manifest. A "Page URL pattern" set in Options (e.g. /{slug}) is used instead when given.
+async function resolvePageUrls(plan, ctx, save) {
+  const { api, manifest: m, log, idx } = ctx;
+  if (plan.options.pageUrlPattern !== 'auto') { log('  page addresses: ' + plan.options.pageUrlPattern + ' (from Options)'); return; }
+  const keys = [...linkedPageKeys(plan, idx, { includeAttachments: plan.options.includeAttachments })].filter(k => m.pages[k] && !m.pages[k].url);
+  for (const k of keys) {
+    man.recordPage(m, k, { url: await api.pageUrl(m.pages[k].streamlineId) });
+    save();
   }
-  const ours = new Set(Object.values(m.pages).map(r => String(r.streamlineId)));
-  const samples = (await api.listPages())
-    .filter(p => !p.unpublished && p.slug && p.activePageVersion && !ours.has(String(p.id)) && /[a-z]{3}/i.test(p.amplifyTitle || ''))
-    .slice(0, 3);
-  const unescape = s => s.replace(/&amp;/g, '&').replace(/&#39;|&#x27;/g, "'").replace(/&quot;/g, '"');
-  for (const pat of URL_PATTERNS) {
-    for (const s of samples) {
-      const r = await api.probe(pat.replace('{slug}', s.slug));
-      if (r.status === 200 && unescape(r.text).toLowerCase().includes(String(s.amplifyTitle).toLowerCase())) {
-        m.pageUrlPattern = pat;
-        log('Page URLs: ' + pat + ' (checked against "' + s.amplifyTitle + '")');
-        return pat;
-      }
-    }
-  }
-  throw new Error('Could not work out how page URLs look on this site' +
-    (samples.length ? ' (tried ' + URL_PATTERNS.join(', ') + ' on ' + samples.map(s => '"' + s.amplifyTitle + '"').join(', ') + ')' : ' (no published pages to check against)') +
-    '. Set "Page URL pattern" in Options, e.g. /{slug}.');
+  if (keys.length) log('  looked up ' + keys.length + ' page address(es) for links between pages');
 }
 
 // Finds the InteriorStandard layout on this site: the known id first, then by name. Never guesses between several.

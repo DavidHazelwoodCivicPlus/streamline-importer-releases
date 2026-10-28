@@ -11,14 +11,15 @@ const DEFAULT_OPTIONS = Object.freeze({
   newsEvents: 'skip',           // only option for now
   includeEmptyMicrosites: false,
   includeAttachments: true,     // content mode: list a page's file attachments under a "Documents" heading
+  faqAccordions: true,          // content mode: a page's D10 FAQ sections become one accordion per question in the main column
   uploadMedia: true,            // content mode: upload the files and images pages link to, and point links at them
-  pageUrlPattern: 'auto',       // how page URLs look on the new site; 'auto' = find out from an existing page
+  pageUrlPattern: 'auto',       // page addresses for links between pages: 'auto' = each page's url from the CMS, or a pattern like /{slug}
   unmatchedRows: 'empty-page',  // workbook mode: rows with no D10 match become 'empty-page' | 'skip'
   limit: 0                      // 0 = all pages; otherwise a small test run
 });
 
 // Options that must stay the same for the whole of a run (resume rebuilds the same plan).
-const RUN_LOCKED = ['menuSource', 'pageContent', 'unpublishedSourceAs', 'includeAttachments', 'uploadMedia', 'unmatchedRows'];
+const RUN_LOCKED = ['menuSource', 'pageContent', 'unpublishedSourceAs', 'includeAttachments', 'uploadMedia', 'unmatchedRows', 'faqAccordions'];
 
 function normalizeOptions(o) {
   const opts = Object.assign({}, DEFAULT_OPTIONS, o || {});
@@ -28,8 +29,8 @@ function normalizeOptions(o) {
   if (opts.newsEvents !== 'skip') throw new Error('News and events can only be skipped for now');
   if (opts.pageUrlPattern !== 'auto' && !/\{slug\}/.test(opts.pageUrlPattern)) throw new Error('Page URL pattern must contain {slug}, e.g. /{slug}');
   opts.limit = Math.max(0, parseInt(opts.limit, 10) || 0);
-  for (const k of ['includeEmptyMicrosites', 'includeAttachments', 'uploadMedia']) opts[k] = !!opts[k];
-  if (opts.pageContent === 'empty') opts.uploadMedia = false;
+  for (const k of ['includeEmptyMicrosites', 'includeAttachments', 'uploadMedia', 'faqAccordions']) opts[k] = !!opts[k];
+  if (opts.pageContent === 'empty') { opts.uploadMedia = false; opts.faqAccordions = false; }
   return opts;
 }
 
@@ -55,10 +56,14 @@ function buildPlan(tree, options, idx) {
           sourcePublished: published, unpublished: !published && opts.unpublishedSourceAs === 'unpublished',
           content: withContent ? 'content' : 'empty', hasBody: !!(src && src.hasBody), notes: (src && src.notes) || [],
           bodyHtml: withContent ? src.bodyHtml : '', attachments: withContent && opts.includeAttachments ? (src.attachments || []) : [],
+          faqs: withContent && opts.faqAccordions ? faqsFor(src, idx) : [],
           row: n.row || null
         };
         pages.push(page);
-        if (withContent && opts.uploadMedia && idx) for (const mid of referencedMedia(idx, page.bodyHtml, page.attachments)) if (!media.includes(mid)) media.push(mid);
+        if (withContent && opts.uploadMedia && idx) {
+          const html = page.bodyHtml + page.faqs.map(q => q.answerHtml).join('');
+          for (const mid of referencedMedia(idx, html, page.attachments)) if (!media.includes(mid)) media.push(mid);
+        }
       }
       const menuKey = 'menu:' + (n.menuKey || n.key);
       menu.push({ key: menuKey, pageKey: n.key, parentKey: parentMenuKey, weight: i, title: n.title, level: path.length + 1, path: path.join(' > '), row: n.row || null });
@@ -69,8 +74,18 @@ function buildPlan(tree, options, idx) {
   return { options: opts, pages, menu, media };
 }
 
+// The published FAQs a page's D10 FAQ sections show, section by section, each in D10 order.
+function faqsFor(src, idx) {
+  const out = [];
+  for (const sec of src.faqSections || []) {
+    const list = (idx && idx.faqCategories.get(sec.categoryId)) || [];
+    for (const f of list) if (f.published) out.push({ nid: f.nid, question: f.question, answerHtml: f.answerHtml, categoryId: sec.categoryId });
+  }
+  return out;
+}
+
 function bodyLabel(p) {
-  if (p.content === 'content') return p.hasBody || p.attachments.length ? 'converted' : 'empty (no D10 body)';
+  if (p.content === 'content') return p.hasBody || p.attachments.length || p.faqs.length ? 'converted' : 'empty (no D10 body)';
   if (!p.nid) return 'empty (no D10 match)';
   return p.hasBody ? 'empty (D10 body not imported)' : 'empty';
 }
@@ -87,7 +102,7 @@ function planReportRows(plan, contentByKey) {
       level: m.level, menuPath: m.path, title: m.title, order: m.weight + 1, row: m.row || '',
       sourceType: p.sourceType, nid: p.nid, oldUrl: p.alias,
       d10Published: p.nid ? (p.sourcePublished ? 'yes' : 'no') : '', importAs: p.unpublished ? 'unpublished' : 'published',
-      body: bodyLabel(p), attachments: p.attachments.length || '',
+      body: bodyLabel(p), attachments: p.attachments.length || '', faqs: p.faqs.length || '',
       linksToPages: count('page'), linksToMedia: count('media'), linksToOldSite: count('old-site'),
       dropped: c ? c.warnings.map(w => w.code).join(' ') : '',
       notes: p.notes.filter(n => p.content !== 'content' || !/attachments/i.test(n) || !p.attachments.length).join('; ')

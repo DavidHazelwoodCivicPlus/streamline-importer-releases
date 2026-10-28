@@ -71,12 +71,13 @@ const fetch_ = window.fetch.bind(window);
     else if (/^\/api\/menu_items\/\d+$/.test(path) && method === 'PUT') { const id = +path.split('/').pop(); if (!cms.items.has(id)) r = json(404, null); else { if (body.deleted) cms.items.delete(id); r = json(200, body); } }
     else if (/^\/api\/pocs\//.test(path)) {
       const id = decodeURIComponent(path.split('/').pop()); const p = cms.pages.get(id);
-      if (!p) r = json(404, null); else if (method === 'GET') r = json(200, { id, title: p.title, deleted: false }); else { cms.pages.delete(id); r = json(200, {}); }
+      if (!p) r = json(404, null); else if (method === 'GET') r = json(200, { id, title: p.title, url: '/' + p.slug, deleted: false }); else { cms.pages.delete(id); r = json(200, {}); }
     } else if (path === '/api/graphql') {
       const q = body.query, v = body.variables || {};
       if (/amplifyUpsertPage/.test(q)) { const id = 'pg-' + (++cms.seq); const ap = v.i.amplifyPage; const slug = ap.amplifyTitle.toLowerCase().replace(/\W+/g, '-'); cms.pages.set(id, { id, title: ap.amplifyTitle, slug, unpublished: ap.unpublished, promoted: false, createdAt: new Date().toISOString() }); r = json(200, { data: { amplifyUpsertPage: { page: { id, slug } } } }); }
       else if (/amplifyDraft/.test(q)) r = json(200, { data: { amplifyDraft: { containers: [{ columns: [{ id: 'main-' + v.id, columnType: 'main' }, { id: 'gutter-' + v.id, columnType: 'gutter' }] }] } } });
       else if (/amplifyUpsertSectionInstance/.test(q)) { const id = 'sec-' + (++cms.seq); cms.sections.set(id, { pageId: v.i.sectionInstance.instanceableId }); r = json(200, { data: { amplifyUpsertSectionInstance: { sectionInstance: { id, name: 'Freeform' } } } }); }
+      else if (/amplifyUpdatePreferencesFreeform/.test(q)) { Object.assign(cms.sections.get(v.i.sectionInstanceId), { prefs: v.i.preferences }); r = json(200, { data: { amplifyUpdatePreferencesFreeform: { clientMutationId: null } } }); }
       else if (/amplifyUpsertFreeformContent/.test(q)) { Object.assign(cms.sections.get(v.i.sectionInstanceId), { html: v.i.html, json: v.i.json }); r = json(200, { data: { amplifyUpsertFreeformContent: { clientMutationId: null } } }); }
       else if (/createFileUpload/.test(q)) r = json(200, { data: { createFileUpload: { putUrl: 'https://fake-s3/' + encodeURIComponent(v.b), storagePath: 'sp/' + v.b } } });
       else if (/createImage/.test(q)) { const id = 'img-' + (++cms.seq); cms.media.set(id, { kind: 'image', path: v.p, altText: 'AI alt' }); r = json(200, { data: { createImage: { image: { id, largeUrl: 'https://imgix.fake/' + v.p, altText: 'AI alt' } } } }); }

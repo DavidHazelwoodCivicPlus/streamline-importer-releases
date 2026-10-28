@@ -24,7 +24,10 @@ function buildLinkIndex(exp) {
     if (m.uuid) byUuid.set(m.uuid, m.mid);
     if (m.url && m.kind !== 'video') { try { byPath.set(normPath(new URL(m.url).pathname), m.mid); } catch (e) { /* bad url */ } }
   }
-  return { nodes, aliases, media, byUuid, byPath, hosts: new Set((exp.hosts || []).map(h => h.toLowerCase())), origin: exp.origin || '' };
+  return {
+    nodes, aliases, media, byUuid, byPath, hosts: new Set((exp.hosts || []).map(h => h.toLowerCase())), origin: exp.origin || '',
+    faqCategories: exp.faqCategories || new Map()
+  };
 }
 
 const keyFor = (idx, nid) => { const n = idx.nodes.get(nid); return n ? n.sourceType + ':' + nid : null; };

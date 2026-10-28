@@ -56,6 +56,21 @@ function streamlineApi(client, opts) {
     );
   }
 
+  // Section settings. An accordion folds the section under accordionTitle (checked on the sandbox, 2026-10-28).
+  async function setFreeformPreferences(sectionInstanceId, prefs) {
+    await gql(
+      'mutation($i: AmplifyPreferencesFreeformMutationInput!) { amplifyUpdatePreferencesFreeform(input: $i) { clientMutationId } }',
+      { i: { sectionInstanceId, preferences: Object.assign({ colorIndex: 'light1', padding: true, highContrast: false }, prefs) } }
+    );
+  }
+
+  // The page's public address on this site, e.g. "/boil-water-order-faqs", as the CMS reports it.
+  async function pageUrl(pageId) {
+    const rec = await request('GET', '/api/pocs/' + encodeURIComponent(pageId));
+    if (!rec || !rec.url) throw new Error('The CMS returned no url for page ' + pageId);
+    return rec.url;
+  }
+
   // "already published" is not an error: the public copy is current.
   async function promoteDraft(pageId) {
     try {
@@ -172,7 +187,7 @@ function streamlineApi(client, opts) {
 
   return {
     createPage, draftColumns, addSection, setFreeform, promoteDraft, deletePage, listPages, listLayouts,
-    uploadMedia, deleteMedia, probe: client.probe,
+    uploadMedia, deleteMedia, setFreeformPreferences, pageUrl,
     menuIdFor, menuItems, createMenuItem, softDeleteMenuItem
   };
 }

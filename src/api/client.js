@@ -68,15 +68,7 @@ function makeClient(transport, opts) {
     return j.data;
   }
 
-  // Plain GET of a page on this site, for checking that a URL exists. Never throws on status.
-  async function probe(path) {
-    await throttle();
-    count++;
-    const res = await transport({ method: 'GET', path, headers: { Accept: 'text/html' } });
-    return { status: res.status, text: res.text || '' };
-  }
-
-  return { request, gql, probe, host: opts.host, requestCount: () => count };
+  return { request, gql, host: opts.host, requestCount: () => count };
 }
 
 const backoff = attempt => Math.min(30000, 1000 * Math.pow(2, attempt));

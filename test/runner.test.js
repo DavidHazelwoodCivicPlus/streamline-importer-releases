@@ -28,13 +28,14 @@ function fakeCms(opts) {
       return { id, slug: pages.get(id).slug };
     },
     async listPages() { return [...pages.values()].map(p => ({ id: p.id, amplifyTitle: p.title, slug: p.slug, unpublished: !!p.unpublished, draftPageVersion: { createdAt: p.createdAt }, activePageVersion: p.promoted || p.existing ? { createdAt: p.createdAt } : null })); },
-    sections: new Map(), media: new Map(), probes: [],
+    sections: new Map(), media: new Map(), urlLookups: [],
     async draftColumns(id) { return [{ id: 'col-main-' + id, columnType: 'main' }, { id: 'col-gutter-' + id, columnType: 'gutter' }]; },
-    async addSection(pageId, name, columnId) { write(); const id = 's' + (++seq); this.sections.set(id, { pageId, columnId, html: null }); return id; },
+    async addSection(pageId, name, columnId, weight) { write(); const id = 's' + (++seq); this.sections.set(id, { pageId, columnId, weight, html: null }); return id; },
+    async setFreeformPreferences(sid, prefs) { write(); this.sections.get(sid).prefs = prefs; },
+    async pageUrl(id) { this.urlLookups.push(pages.get(id).title); return '/' + pages.get(id).slug; },
     async setFreeform(sid, html, json) { write(); const s = this.sections.get(sid); s.html = html; s.json = json; },
     async uploadMedia({ kind, basename, altText }) { write(); const id = 'm' + (++seq); this.media.set(id, { kind, basename, altText }); return { kind, id, url: '/files/' + id + '/' + basename, altText }; },
     async deleteMedia(kind, id) { write(); this.media.delete(id); },
-    async probe(path) { this.probes.push(path); const p = [...pages.values()].find(x => '/' + x.slug === path); return p ? { status: 200, text: '<title>' + p.title + '</title>' } : { status: 404, text: '' }; },
     async promoteDraft(id) { write(); pages.get(id).promoted = true; return 'promoted'; },
     async deletePage(id) { write(); return pages.delete(id) ? 'deleted' : 'gone'; },
     async menuIdFor() { return 5; },
@@ -122,54 +123,84 @@ test('a page created but whose reply was lost is flagged on resume, not adopted'
   assert.equal(api.pages.size, p.pages.length + 1); // the orphan is left for a person to check
 });
 
-// Content mode: an export with a body link, an attachment and a page that is not imported.
-function contentSetup() {
+// Content mode: an export with a body link, an attachment, a page that is not imported, and an FAQ section.
+const faqRec = (nid, q, a, cat, w, pub) => ({ entity_id: String(nid), bundle: 'faq', is_published: pub !== false, fields: { title: [{ value: q }], body: [{ value: a }], field_faq_category: [{ target_id: cat }], field_faq_weight: [{ value: String(w) }] } });
+function contentSetup(options) {
   const { page, microsite } = require('./fixtures');
   const { buildLinkIndex } = require('../src/lib/links');
+  // Billing has no body, only an FAQ section (embedded paragraph, as in the real export) for category 7.
+  const faqSection = { target_id: 241, entity: { entity_id: '241', bundle: 'faqs', fields: { field_faq_category: [{ target_id: 7 }], field_collapsing_options: [{ value: 'none' }] } } };
   const pages = [
     page(1, 'Water', 10, { fields: { body: [{ value: '<p>See <a href="/node/2">billing</a> and <a href="/node/9">old news</a>.</p>' }], field_file_attachments: [{ target_id: 50 }] } }),
-    page(2, 'Billing', 10, { fields: { body: [] } }),
+    page(2, 'Billing', 10, { fields: { body: [], field_sections: [faqSection] } }),
     page(9, 'Old news', 10, { fields: { field_news_date: ['2020-01-01'] } })
+  ];
+  const faqs = [
+    faqRec(91, 'How do I pay?', '<p>Online, or see <a href="/node/1">water</a>.</p>', 7, 2),
+    faqRec(92, 'When is it due?', '<p>On the 15th.</p>', 7, 1),
+    faqRec(93, 'Draft question', '<p>Not yet.</p>', 7, 3, false),
+    faqRec(94, 'Other category', '<p>Elsewhere.</p>', 8, 1)
   ];
   const mediaRec = { entity_id: '50', bundle: 'file', is_published: true, fields: { name: [{ value: 'Rates' }], field_media_file: [{ file_url: 'https://www.old.gov/files/rates.pdf', file_name: 'rates.pdf' }] } };
   const exp = d10.loadExport([
     { name: 'www-pages.json', text: JSON.stringify(pages) },
     { name: 'www-microsites.json', text: JSON.stringify([microsite(10, 'Utilities', '/utilities')]) },
-    { name: 'www-media.json', text: JSON.stringify([mediaRec]) }
+    { name: 'www-media.json', text: JSON.stringify([mediaRec]) },
+    { name: 'www-faqs.json', text: JSON.stringify(faqs) }
   ]);
   const idx = buildLinkIndex(exp);
-  const p = buildPlan(buildNavFromD10(exp).tree, { pageContent: 'content' }, idx);
+  const p = buildPlan(buildNavFromD10(exp).tree, Object.assign({ pageContent: 'content' }, options), idx);
   return { idx, p };
 }
 const seedExisting = api => api.pages.set('home', { id: 'home', title: 'Welcome Home', slug: 'welcome-home', existing: true, createdAt: '2020-01-01T00:00:00Z' });
 const download = async url => ({ type: 'application/pdf', url });
 
-test('content mode: media uploaded, body written with links to new pages and media, url pattern checked', async () => {
+test('content mode: media uploaded, body written, links use each page url from the CMS', async () => {
   const { idx, p } = contentSetup();
   assert.deepEqual(p.media, ['50']);
   const api = fakeCms(), m = man.newManifest({ host: 'h' });
   seedExisting(api);
-  const logs = [];
-  await runPlan(p, ctx(api, m, { idx, download, log: s => logs.push(s) }));
-  assert.ok(logs.some(l => /Page URLs: \/\{slug\} \(checked against "Welcome Home"\)/.test(l)));
+  await runPlan(p, ctx(api, m, { idx, download }));
+  assert.deepEqual(api.urlLookups.sort(), ['Billing', 'Water'], 'only pages that something links to are looked up');
   assert.equal(api.media.size, 1);
   const water = [...api.sections.values()].find(s => api.pages.get(s.pageId).title === 'Water');
   assert.match(water.html, /<a href="\/billing">billing<\/a>/);
   assert.match(water.html, /href="https:\/\/www\.old\.gov\/ms10\/page\/old-news"/);
   assert.match(water.html, /<a href="\/files\/m\d+\/rates\.pdf">Rates<\/a>/);
-  assert.equal(api.sections.size, 1, 'pages without a body get no section');
+  assert.equal(m.pages['page:2'].url, '/billing');
   assert.ok(Object.values(m.pages).every(r => r.stage === 'promoted'));
+});
+
+test('FAQ sections become one accordion per published question, in D10 order, links rewritten', async () => {
+  const { idx, p } = contentSetup();
+  const billing = p.pages.find(x => x.title === 'Billing');
+  assert.deepEqual(billing.faqs.map(f => f.question), ['When is it due?', 'How do I pay?']);
+  const api = fakeCms(), m = man.newManifest({ host: 'h' });
+  await runPlan(p, ctx(api, m, { idx, download }));
+  const secs = [...api.sections.values()].filter(s => api.pages.get(s.pageId).title === 'Billing').sort((a, b) => a.weight - b.weight);
+  assert.deepEqual(secs.map(s => [s.weight, s.prefs.accordion, s.prefs.accordionTitle]), [[1, true, 'When is it due?'], [2, true, 'How do I pay?']]);
+  assert.match(secs[1].html, /<a href="\/water">water<\/a>/);
+  assert.equal(m.pages['page:2'].faqs, 2);
+});
+
+test('FAQ accordions can be turned off', async () => {
+  const { idx, p } = contentSetup({ faqAccordions: false });
+  assert.deepEqual(p.pages.find(x => x.title === 'Billing').faqs, []);
+  const api = fakeCms();
+  await runPlan(p, ctx(api, man.newManifest({ host: 'h' }), { idx, download }));
+  assert.equal([...api.sections.values()].filter(s => api.pages.get(s.pageId).title === 'Billing').length, 0);
 });
 
 test('content mode resumes after a failure at any write, without duplicate sections or uploads', async () => {
   const { idx, p } = contentSetup();
-  for (let failAt = 1; failAt <= 12; failAt++) {
+  for (let failAt = 1; failAt <= 24; failAt++) {
     const api = fakeCms({ failAt }), m = man.newManifest({ host: 'h' });
     seedExisting(api);
     await runPlan(p, ctx(api, m, { idx, download })).catch(e => { if (!/simulated/.test(e.message)) throw e; });
     await runPlan(p, ctx(api, m, { idx, download }));
     assert.equal(api.media.size, 1, 'uploads, failAt ' + failAt);
-    assert.equal(api.sections.size, 1, 'sections, failAt ' + failAt);
+    assert.equal(api.sections.size, 3, 'sections, failAt ' + failAt);
+    assert.ok([...api.sections.values()].every(s => s.html), 'every section has content, failAt ' + failAt);
     assert.equal(api.pages.size, p.pages.length + 1, 'pages, failAt ' + failAt);
   }
 });
@@ -181,18 +212,17 @@ test('a failed download is reported and the link stays on the old site', async (
   await runPlan(p, ctx(api, m, { idx, download: async () => { throw new Error('404'); } }));
   assert.equal(api.media.size, 0);
   assert.ok(m.mediaFailures['50']);
-  const html = [...api.sections.values()][0].html;
+  const html = [...api.sections.values()].find(s => api.pages.get(s.pageId).title === 'Water').html;
   assert.match(html, /href="https:\/\/www\.old\.gov\/files\/rates\.pdf"/);
 });
 
-test('page url pattern: stops with advice when it cannot be worked out, uses the option when set', async () => {
-  const { idx, p } = contentSetup();
+test('a page URL pattern set in Options is used instead of looking addresses up', async () => {
+  const { idx, p } = contentSetup({ pageUrlPattern: '/p/{slug}' });
   const api = fakeCms();
-  await assert.rejects(runPlan(p, ctx(api, man.newManifest({ host: 'h' }), { idx, download })), /Page URL pattern/);
-  const set = buildPlan(require('../src/lib/navFromD10').buildNavFromD10(d10.loadExport(exportFiles())).tree, { pageContent: 'content', pageUrlPattern: '/p/{slug}' }, idx);
-  const m = man.newManifest({ host: 'h' });
-  await runPlan(set, ctx(fakeCms(), m, { idx, download }));
-  assert.equal(m.pageUrlPattern, '/p/{slug}');
+  await runPlan(p, ctx(api, man.newManifest({ host: 'h' }), { idx, download }));
+  assert.deepEqual(api.urlLookups, []);
+  const water = [...api.sections.values()].find(s => api.pages.get(s.pageId).title === 'Water');
+  assert.match(water.html, /<a href="\/p\/billing">billing<\/a>/);
 });
 
 test('resume refuses different run options', async () => {

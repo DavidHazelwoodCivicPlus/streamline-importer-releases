@@ -12,7 +12,7 @@ const PLAN_COLUMNS = [
   { key: 'level', label: 'Level' }, { key: 'menuPath', label: 'Parent path' }, { key: 'title', label: 'Menu item / page' },
   { key: 'order', label: 'Order' }, { key: 'sourceType', label: 'D10 type' }, { key: 'nid', label: 'D10 nid' },
   { key: 'oldUrl', label: 'Old URL' }, { key: 'd10Published', label: 'Published in D10' }, { key: 'importAs', label: 'Import as' },
-  { key: 'row', label: 'Sheet row' }, { key: 'body', label: 'Body' }, { key: 'attachments', label: 'Attachments' },
+  { key: 'row', label: 'Sheet row' }, { key: 'body', label: 'Body' }, { key: 'attachments', label: 'Attachments' }, { key: 'faqs', label: 'FAQ accordions' },
   { key: 'linksToPages', label: 'Links to new pages' }, { key: 'linksToMedia', label: 'Links to uploaded media' },
   { key: 'linksToOldSite', label: 'Links left on old site' }, { key: 'dropped', label: 'Dropped markup' },
   { key: 'notes', label: 'Not carried over' }

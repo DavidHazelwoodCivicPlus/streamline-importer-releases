@@ -35,3 +35,13 @@ for (const dir of dirs) {
 }
 
 if (!dirs.length) test('sample exports', { skip: 'no sample folders found' }, () => {});
+
+const harvard = require('./samples').sampleDir('cityofharvard');
+test('Harvard: the Boil Water Order page gets its 5 FAQs as accordions, in D10 order', { skip: !harvard }, () => {
+  const files = fs.readdirSync(harvard).filter(f => /^www-.*\.json$/.test(f)).map(f => ({ name: f, text: fs.readFileSync(path.join(harvard, f), 'utf8') }));
+  const exp = d10.loadExport(files);
+  const plan = buildPlan(buildNavFromD10(exp).tree, { pageContent: 'content' }, require('../src/lib/links').buildLinkIndex(exp));
+  const page = plan.pages.find(p => p.nid === '1061');
+  assert.deepEqual(page.faqs.map(f => f.question), ['When is a boil order issued?', 'How do I know if my home is under a boil order?',
+    'How long does a boil order last?', 'How can I make my water safe?', 'Can I wash my hands using tap water?']);
+});

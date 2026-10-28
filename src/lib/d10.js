@@ -131,6 +131,51 @@ function oldSiteHosts(rawPages, media) {
   return list;
 }
 
+// A page's sections (paragraphs), in field order. The export embeds each paragraph in field_sections;
+// when it does not, the paragraph is looked up in www-paragraphs.json by id.
+function sectionsOf(rec, paragraphById) {
+  return fieldItems(rec, 'field_sections').map(it => {
+    if (!it) return null;
+    const p = it.entity && it.entity.fields ? it.entity : paragraphById.get(String(it.target_id));
+    return p ? { pid: String(p.entity_id), bundle: p.bundle, rec: p } : { pid: String(it.target_id), bundle: null, rec: null };
+  }).filter(Boolean);
+}
+
+// The FAQ sections a page shows: each names one FAQ category.
+function faqSectionsOf(rec, paragraphById) {
+  return sectionsOf(rec, paragraphById).filter(s => s.bundle === 'faqs' && s.rec).map(s => ({
+    pid: s.pid,
+    categoryId: firstValue(s.rec, 'field_faq_category') != null ? String(firstValue(s.rec, 'field_faq_category')) : '',
+    collapsing: String(firstValue(s.rec, 'field_collapsing_options') || '')
+  })).filter(s => s.categoryId);
+}
+
+function summarizeFaq(rec) {
+  const body = firstValue(rec, 'body');
+  return {
+    nid: String(rec.entity_id),
+    question: cleanTitle(firstValue(rec, 'title')),
+    answerHtml: typeof body === 'string' ? body : '',
+    categoryId: firstValue(rec, 'field_faq_category') != null ? String(firstValue(rec, 'field_faq_category')) : '',
+    weight: Number(firstValue(rec, 'field_faq_weight')) || 0,
+    micrositeIds: fieldItems(rec, 'og_audience').map(itemValue).filter(v => v != null).map(String),
+    alias: aliasOf(rec),
+    published: rec.is_published === true
+  };
+}
+
+// FAQs in each category, in the order D10 lists them: weight, then question.
+function faqsByCategory(faqs) {
+  const map = new Map();
+  for (const f of faqs) {
+    if (!f.categoryId) continue;
+    if (!map.has(f.categoryId)) map.set(f.categoryId, []);
+    map.get(f.categoryId).push(f);
+  }
+  for (const list of map.values()) list.sort((a, b) => a.weight - b.weight || a.question.localeCompare(b.question) || Number(a.nid) - Number(b.nid));
+  return map;
+}
+
 // "www-pages.json" -> "pages". Returns null for names that are not export files.
 function exportKey(fileName) {
   const m = /(?:^|[\\/])www-([a-z_]+)\.json$/i.exec(String(fileName));
@@ -174,10 +219,18 @@ function loadExport(files) {
   const hosts = oldSiteHosts(raw.pages, media);
   const origin = hosts.length ? 'https://' + hosts[0] : '';
 
-  return { pages, microsites, media, terms, hosts, origin, counts, errors, warnings, raw };
+  // FAQ sections on pages and microsites, and the FAQs themselves.
+  const paragraphById = new Map((raw.paragraphs || []).filter(p => p && p.entity_id != null).map(p => [String(p.entity_id), p]));
+  const rawByNid = new Map([...(raw.pages || []), ...(raw.microsites || [])].filter(r => r && r.fields).map(r => [String(r.entity_id), r]));
+  for (const s of pages.concat(microsites)) s.faqSections = faqSectionsOf(rawByNid.get(s.nid), paragraphById);
+  const faqs = (raw.faqs || []).filter(r => r && r.fields).map(summarizeFaq);
+  const faqCategories = faqsByCategory(faqs);
+
+  return { pages, microsites, media, faqs, faqCategories, terms, hosts, origin, counts, errors, warnings, raw };
 }
 
 module.exports = {
   KNOWN_FILES, REQUIRED_FILES, fieldItems, firstValue, hasValue, cleanTitle, classifyPage,
-  summarizePage, summarizeMicrosite, summarizeMedia, oldSiteHosts, exportKey, loadExport
+  summarizePage, summarizeMicrosite, summarizeMedia, summarizeFaq, faqsByCategory, sectionsOf, faqSectionsOf,
+  oldSiteHosts, exportKey, loadExport
 };

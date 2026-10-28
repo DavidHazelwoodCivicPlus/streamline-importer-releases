@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Drupal 10 to Streamline Importer
 // @namespace    civicplus.streamline.d10importer
-// @version      0.3.0
+// @version      0.4.0
 // @description  Create Streamline pages and the primary menu from a Drupal 10 export (www-*.json). Runs on any Streamline CMS admin page; does nothing elsewhere.
 // @match        https://*/*
 // @require      https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js
@@ -12,7 +12,7 @@
 // @updateURL    https://raw.githubusercontent.com/DavidHazelwoodCivicPlus/streamline-importer-releases/main/dist/streamline-importer.meta.js
 // @downloadURL  https://raw.githubusercontent.com/DavidHazelwoodCivicPlus/streamline-importer-releases/main/dist/streamline-importer.user.js
 // ==/UserScript==
-// Built 2026-10-27T16:36:11.118Z. Do not edit; edit src/ and run "npm run build".
+// Built 2026-10-28T17:54:31.737Z. Do not edit; edit src/ and run "npm run build".
 
 (function () {
   'use strict';
@@ -88,15 +88,7 @@ function makeClient(transport, opts) {
     return j.data;
   }
 
-  // Plain GET of a page on this site, for checking that a URL exists. Never throws on status.
-  async function probe(path) {
-    await throttle();
-    count++;
-    const res = await transport({ method: 'GET', path, headers: { Accept: 'text/html' } });
-    return { status: res.status, text: res.text || '' };
-  }
-
-  return { request, gql, probe, host: opts.host, requestCount: () => count };
+  return { request, gql, host: opts.host, requestCount: () => count };
 }
 
 const backoff = attempt => Math.min(30000, 1000 * Math.pow(2, attempt));
@@ -198,6 +190,21 @@ function streamlineApi(client, opts) {
       'mutation($i: UpsertFreeformContentMutationInput!) { amplifyUpsertFreeformContent(input: $i) { clientMutationId } }',
       { i: { sectionInstanceId, html, json } }
     );
+  }
+
+  // Section settings. An accordion folds the section under accordionTitle (checked on the sandbox, 2026-10-28).
+  async function setFreeformPreferences(sectionInstanceId, prefs) {
+    await gql(
+      'mutation($i: AmplifyPreferencesFreeformMutationInput!) { amplifyUpdatePreferencesFreeform(input: $i) { clientMutationId } }',
+      { i: { sectionInstanceId, preferences: Object.assign({ colorIndex: 'light1', padding: true, highContrast: false }, prefs) } }
+    );
+  }
+
+  // The page's public address on this site, e.g. "/boil-water-order-faqs", as the CMS reports it.
+  async function pageUrl(pageId) {
+    const rec = await request('GET', '/api/pocs/' + encodeURIComponent(pageId));
+    if (!rec || !rec.url) throw new Error('The CMS returned no url for page ' + pageId);
+    return rec.url;
   }
 
   // "already published" is not an error: the public copy is current.
@@ -316,7 +323,7 @@ function streamlineApi(client, opts) {
 
   return {
     createPage, draftColumns, addSection, setFreeform, promoteDraft, deletePage, listPages, listLayouts,
-    uploadMedia, deleteMedia, probe: client.probe,
+    uploadMedia, deleteMedia, setFreeformPreferences, pageUrl,
     menuIdFor, menuItems, createMenuItem, softDeleteMenuItem
   };
 }
@@ -326,29 +333,42 @@ module.exports = { streamlineApi, INTERIOR_STANDARD_LAYOUT_ID, mimeFor };
   },
   "lib/content": function (module, exports, require) {
 'use strict';
-// Builds one page's freeform content (html + Lexical json) from its D10 body and attachments,
-// with links resolved for the new site. Used for real by the runner and with placeholders by the dry run.
+// Builds one page's freeform content (html + Lexical json) from its D10 body and attachments, and one
+// accordion per FAQ its D10 FAQ sections show, with links resolved for the new site.
+// Used for real by the runner and with placeholders by the dry run.
 
 const { convertHtml } = require('./lexical');
 const { makeResolver, attachmentsHtml } = require('./links');
 
-// page: a plan page (bodyHtml, attachments). lookups: see links.makeResolver.
-// Returns { html, json, warnings, links: [{href, type, result, outcome, target, reason}], empty }
+const isEmptyDoc = json => json.root.children.length === 1 && json.root.children[0].type === 'paragraph' && !json.root.children[0].children.length;
+
+// page: a plan page (bodyHtml, attachments, faqs). lookups: see links.makeResolver.
+// Returns { html, json, warnings, links: [{href, type, result, outcome, target, reason}], empty,
+//           faqs: [{ nid, question, html, json }] }
+// empty = the body (with its attachments) has nothing in it; the page may still have FAQs.
 function buildPageContent(page, idx, lookups, opts) {
   opts = opts || {};
-  const source = (page.bodyHtml || '') + (opts.includeAttachments !== false ? attachmentsHtml(idx, page.attachments) : '');
   const links = [];
   const resolver = makeResolver(idx, lookups, e => links.push(e));
-  const r = convertHtml(source, {
+  const convert = html => convertHtml(html, {
     resolveLink: resolver.resolveLink,
     resolveEmbed: resolver.resolveEmbed,
     resolveImage: () => null // bodies in the samples have no <img>; any that appear are reported
   });
-  const empty = r.json.root.children.length === 1 && r.json.root.children[0].type === 'paragraph' && !r.json.root.children[0].children.length;
+
+  const r = convert((page.bodyHtml || '') + (opts.includeAttachments !== false ? attachmentsHtml(idx, page.attachments) : ''));
   // Attachments that point at media missing from www-media.json have no file to link to.
   const warnings = r.warnings.slice();
   if (opts.includeAttachments !== false) for (const id of page.attachments || []) if (!idx.media.has(id)) warnings.push({ code: 'attachment-missing', detail: 'media ' + id + ' is not in www-media.json' });
-  return { html: r.html, json: r.json, warnings, links, empty };
+
+  const faqs = (page.faqs || []).map(f => {
+    const a = convert(f.answerHtml || '');
+    for (const w of a.warnings) warnings.push({ code: w.code, detail: 'FAQ "' + f.question + '": ' + w.detail });
+    if (isEmptyDoc(a.json)) warnings.push({ code: 'faq-empty-answer', detail: 'FAQ "' + f.question + '" has no answer' });
+    return { nid: f.nid, question: f.question, html: a.html, json: a.json };
+  });
+
+  return { html: r.html, json: r.json, warnings, links, empty: isEmptyDoc(r.json), faqs };
 }
 
 // Dry-run lookups: say where links would go without knowing real URLs yet.
@@ -361,7 +381,16 @@ function placeholderLookups(plan) {
   };
 }
 
-module.exports = { buildPageContent, placeholderLookups };
+// Which imported pages the content links to (so the runner only looks up those pages' addresses).
+function linkedPageKeys(plan, idx, opts) {
+  const keys = new Set(plan.pages.map(p => p.key));
+  const wanted = new Set();
+  const lookups = { pageUrl: key => { if (keys.has(key)) wanted.add(key); return null; }, media: () => null };
+  for (const p of plan.pages) if (p.content === 'content') buildPageContent(p, idx, lookups, opts);
+  return wanted;
+}
+
+module.exports = { buildPageContent, placeholderLookups, linkedPageKeys };
 
   },
   "lib/csv": function (module, exports, require) {
@@ -379,7 +408,7 @@ const PLAN_COLUMNS = [
   { key: 'level', label: 'Level' }, { key: 'menuPath', label: 'Parent path' }, { key: 'title', label: 'Menu item / page' },
   { key: 'order', label: 'Order' }, { key: 'sourceType', label: 'D10 type' }, { key: 'nid', label: 'D10 nid' },
   { key: 'oldUrl', label: 'Old URL' }, { key: 'd10Published', label: 'Published in D10' }, { key: 'importAs', label: 'Import as' },
-  { key: 'row', label: 'Sheet row' }, { key: 'body', label: 'Body' }, { key: 'attachments', label: 'Attachments' },
+  { key: 'row', label: 'Sheet row' }, { key: 'body', label: 'Body' }, { key: 'attachments', label: 'Attachments' }, { key: 'faqs', label: 'FAQ accordions' },
   { key: 'linksToPages', label: 'Links to new pages' }, { key: 'linksToMedia', label: 'Links to uploaded media' },
   { key: 'linksToOldSite', label: 'Links left on old site' }, { key: 'dropped', label: 'Dropped markup' },
   { key: 'notes', label: 'Not carried over' }
@@ -542,6 +571,51 @@ function oldSiteHosts(rawPages, media) {
   return list;
 }
 
+// A page's sections (paragraphs), in field order. The export embeds each paragraph in field_sections;
+// when it does not, the paragraph is looked up in www-paragraphs.json by id.
+function sectionsOf(rec, paragraphById) {
+  return fieldItems(rec, 'field_sections').map(it => {
+    if (!it) return null;
+    const p = it.entity && it.entity.fields ? it.entity : paragraphById.get(String(it.target_id));
+    return p ? { pid: String(p.entity_id), bundle: p.bundle, rec: p } : { pid: String(it.target_id), bundle: null, rec: null };
+  }).filter(Boolean);
+}
+
+// The FAQ sections a page shows: each names one FAQ category.
+function faqSectionsOf(rec, paragraphById) {
+  return sectionsOf(rec, paragraphById).filter(s => s.bundle === 'faqs' && s.rec).map(s => ({
+    pid: s.pid,
+    categoryId: firstValue(s.rec, 'field_faq_category') != null ? String(firstValue(s.rec, 'field_faq_category')) : '',
+    collapsing: String(firstValue(s.rec, 'field_collapsing_options') || '')
+  })).filter(s => s.categoryId);
+}
+
+function summarizeFaq(rec) {
+  const body = firstValue(rec, 'body');
+  return {
+    nid: String(rec.entity_id),
+    question: cleanTitle(firstValue(rec, 'title')),
+    answerHtml: typeof body === 'string' ? body : '',
+    categoryId: firstValue(rec, 'field_faq_category') != null ? String(firstValue(rec, 'field_faq_category')) : '',
+    weight: Number(firstValue(rec, 'field_faq_weight')) || 0,
+    micrositeIds: fieldItems(rec, 'og_audience').map(itemValue).filter(v => v != null).map(String),
+    alias: aliasOf(rec),
+    published: rec.is_published === true
+  };
+}
+
+// FAQs in each category, in the order D10 lists them: weight, then question.
+function faqsByCategory(faqs) {
+  const map = new Map();
+  for (const f of faqs) {
+    if (!f.categoryId) continue;
+    if (!map.has(f.categoryId)) map.set(f.categoryId, []);
+    map.get(f.categoryId).push(f);
+  }
+  for (const list of map.values()) list.sort((a, b) => a.weight - b.weight || a.question.localeCompare(b.question) || Number(a.nid) - Number(b.nid));
+  return map;
+}
+
 // "www-pages.json" -> "pages". Returns null for names that are not export files.
 function exportKey(fileName) {
   const m = /(?:^|[\\/])www-([a-z_]+)\.json$/i.exec(String(fileName));
@@ -585,12 +659,20 @@ function loadExport(files) {
   const hosts = oldSiteHosts(raw.pages, media);
   const origin = hosts.length ? 'https://' + hosts[0] : '';
 
-  return { pages, microsites, media, terms, hosts, origin, counts, errors, warnings, raw };
+  // FAQ sections on pages and microsites, and the FAQs themselves.
+  const paragraphById = new Map((raw.paragraphs || []).filter(p => p && p.entity_id != null).map(p => [String(p.entity_id), p]));
+  const rawByNid = new Map([...(raw.pages || []), ...(raw.microsites || [])].filter(r => r && r.fields).map(r => [String(r.entity_id), r]));
+  for (const s of pages.concat(microsites)) s.faqSections = faqSectionsOf(rawByNid.get(s.nid), paragraphById);
+  const faqs = (raw.faqs || []).filter(r => r && r.fields).map(summarizeFaq);
+  const faqCategories = faqsByCategory(faqs);
+
+  return { pages, microsites, media, faqs, faqCategories, terms, hosts, origin, counts, errors, warnings, raw };
 }
 
 module.exports = {
   KNOWN_FILES, REQUIRED_FILES, fieldItems, firstValue, hasValue, cleanTitle, classifyPage,
-  summarizePage, summarizeMicrosite, summarizeMedia, oldSiteHosts, exportKey, loadExport
+  summarizePage, summarizeMicrosite, summarizeMedia, summarizeFaq, faqsByCategory, sectionsOf, faqSectionsOf,
+  oldSiteHosts, exportKey, loadExport
 };
 
   },
@@ -1103,7 +1185,10 @@ function buildLinkIndex(exp) {
     if (m.uuid) byUuid.set(m.uuid, m.mid);
     if (m.url && m.kind !== 'video') { try { byPath.set(normPath(new URL(m.url).pathname), m.mid); } catch (e) { /* bad url */ } }
   }
-  return { nodes, aliases, media, byUuid, byPath, hosts: new Set((exp.hosts || []).map(h => h.toLowerCase())), origin: exp.origin || '' };
+  return {
+    nodes, aliases, media, byUuid, byPath, hosts: new Set((exp.hosts || []).map(h => h.toLowerCase())), origin: exp.origin || '',
+    faqCategories: exp.faqCategories || new Map()
+  };
 }
 
 const keyFor = (idx, nid) => { const n = idx.nodes.get(nid); return n ? n.sourceType + ':' + nid : null; };
@@ -1536,14 +1621,15 @@ const DEFAULT_OPTIONS = Object.freeze({
   newsEvents: 'skip',           // only option for now
   includeEmptyMicrosites: false,
   includeAttachments: true,     // content mode: list a page's file attachments under a "Documents" heading
+  faqAccordions: true,          // content mode: a page's D10 FAQ sections become one accordion per question in the main column
   uploadMedia: true,            // content mode: upload the files and images pages link to, and point links at them
-  pageUrlPattern: 'auto',       // how page URLs look on the new site; 'auto' = find out from an existing page
+  pageUrlPattern: 'auto',       // page addresses for links between pages: 'auto' = each page's url from the CMS, or a pattern like /{slug}
   unmatchedRows: 'empty-page',  // workbook mode: rows with no D10 match become 'empty-page' | 'skip'
   limit: 0                      // 0 = all pages; otherwise a small test run
 });
 
 // Options that must stay the same for the whole of a run (resume rebuilds the same plan).
-const RUN_LOCKED = ['menuSource', 'pageContent', 'unpublishedSourceAs', 'includeAttachments', 'uploadMedia', 'unmatchedRows'];
+const RUN_LOCKED = ['menuSource', 'pageContent', 'unpublishedSourceAs', 'includeAttachments', 'uploadMedia', 'unmatchedRows', 'faqAccordions'];
 
 function normalizeOptions(o) {
   const opts = Object.assign({}, DEFAULT_OPTIONS, o || {});
@@ -1553,8 +1639,8 @@ function normalizeOptions(o) {
   if (opts.newsEvents !== 'skip') throw new Error('News and events can only be skipped for now');
   if (opts.pageUrlPattern !== 'auto' && !/\{slug\}/.test(opts.pageUrlPattern)) throw new Error('Page URL pattern must contain {slug}, e.g. /{slug}');
   opts.limit = Math.max(0, parseInt(opts.limit, 10) || 0);
-  for (const k of ['includeEmptyMicrosites', 'includeAttachments', 'uploadMedia']) opts[k] = !!opts[k];
-  if (opts.pageContent === 'empty') opts.uploadMedia = false;
+  for (const k of ['includeEmptyMicrosites', 'includeAttachments', 'uploadMedia', 'faqAccordions']) opts[k] = !!opts[k];
+  if (opts.pageContent === 'empty') { opts.uploadMedia = false; opts.faqAccordions = false; }
   return opts;
 }
 
@@ -1580,10 +1666,14 @@ function buildPlan(tree, options, idx) {
           sourcePublished: published, unpublished: !published && opts.unpublishedSourceAs === 'unpublished',
           content: withContent ? 'content' : 'empty', hasBody: !!(src && src.hasBody), notes: (src && src.notes) || [],
           bodyHtml: withContent ? src.bodyHtml : '', attachments: withContent && opts.includeAttachments ? (src.attachments || []) : [],
+          faqs: withContent && opts.faqAccordions ? faqsFor(src, idx) : [],
           row: n.row || null
         };
         pages.push(page);
-        if (withContent && opts.uploadMedia && idx) for (const mid of referencedMedia(idx, page.bodyHtml, page.attachments)) if (!media.includes(mid)) media.push(mid);
+        if (withContent && opts.uploadMedia && idx) {
+          const html = page.bodyHtml + page.faqs.map(q => q.answerHtml).join('');
+          for (const mid of referencedMedia(idx, html, page.attachments)) if (!media.includes(mid)) media.push(mid);
+        }
       }
       const menuKey = 'menu:' + (n.menuKey || n.key);
       menu.push({ key: menuKey, pageKey: n.key, parentKey: parentMenuKey, weight: i, title: n.title, level: path.length + 1, path: path.join(' > '), row: n.row || null });
@@ -1594,8 +1684,18 @@ function buildPlan(tree, options, idx) {
   return { options: opts, pages, menu, media };
 }
 
+// The published FAQs a page's D10 FAQ sections show, section by section, each in D10 order.
+function faqsFor(src, idx) {
+  const out = [];
+  for (const sec of src.faqSections || []) {
+    const list = (idx && idx.faqCategories.get(sec.categoryId)) || [];
+    for (const f of list) if (f.published) out.push({ nid: f.nid, question: f.question, answerHtml: f.answerHtml, categoryId: sec.categoryId });
+  }
+  return out;
+}
+
 function bodyLabel(p) {
-  if (p.content === 'content') return p.hasBody || p.attachments.length ? 'converted' : 'empty (no D10 body)';
+  if (p.content === 'content') return p.hasBody || p.attachments.length || p.faqs.length ? 'converted' : 'empty (no D10 body)';
   if (!p.nid) return 'empty (no D10 match)';
   return p.hasBody ? 'empty (D10 body not imported)' : 'empty';
 }
@@ -1612,7 +1712,7 @@ function planReportRows(plan, contentByKey) {
       level: m.level, menuPath: m.path, title: m.title, order: m.weight + 1, row: m.row || '',
       sourceType: p.sourceType, nid: p.nid, oldUrl: p.alias,
       d10Published: p.nid ? (p.sourcePublished ? 'yes' : 'no') : '', importAs: p.unpublished ? 'unpublished' : 'published',
-      body: bodyLabel(p), attachments: p.attachments.length || '',
+      body: bodyLabel(p), attachments: p.attachments.length || '', faqs: p.faqs.length || '',
       linksToPages: count('page'), linksToMedia: count('media'), linksToOldSite: count('old-site'),
       dropped: c ? c.warnings.map(w => w.code).join(' ') : '',
       notes: p.notes.filter(n => p.content !== 'content' || !/attachments/i.test(n) || !p.attachments.length).join('; ')
@@ -1632,14 +1732,20 @@ module.exports = { DEFAULT_OPTIONS, RUN_LOCKED, normalizeOptions, buildPlan, pla
   },
   "lib/reports": function (module, exports, require) {
 'use strict';
-// Report-only outputs for content this importer does not create yet. Pure.
+// Reports on what the export holds and where it goes. Pure.
 
 const { fieldItems, firstValue, cleanTitle } = require('./d10');
 
-// One row per FAQ group (microsite + category): where the group would go, and its questions in weight order.
+// One row per FAQ group (microsite + category): the D10 pages whose FAQ sections show it (they get accordions
+// in content mode), the microsite it belongs to, and its questions in weight order.
 function faqReport(exp) {
   const faqs = exp.raw.faqs || [];
   const ms = new Map(exp.microsites.map(m => [m.nid, m]));
+  const shownOn = new Map();
+  for (const p of exp.pages.concat(exp.microsites)) for (const sec of p.faqSections || []) {
+    if (!shownOn.has(sec.categoryId)) shownOn.set(sec.categoryId, []);
+    shownOn.get(sec.categoryId).push(p.title + ' (nid ' + p.nid + (p.kind && p.kind !== 'page' ? ', ' + p.kind + ', not imported' : '') + ')');
+  }
   const groups = new Map();
   for (const f of faqs) {
     if (!f || !f.fields) continue;
@@ -1658,6 +1764,7 @@ function faqReport(exp) {
     return {
       microsite: m ? m.title : (g.msId ? 'microsite ' + g.msId + ' (not in export)' : '(none)'), micrositeNid: g.msId,
       wouldGoOn: m ? m.title + ' (' + m.alias + ')' : '', category: exp.terms[g.catId] || (g.catId ? 'term ' + g.catId : '(none)'),
+      onPages: (shownOn.get(g.catId) || []).join(' | ') || 'none (not shown on any page)',
       count: g.items.length, published: g.items.filter(i => i.published).length,
       questions: g.items.map(i => i.title).join(' | '), nids: g.items.map(i => i.nid).join(' '), oldUrls: g.items.map(i => i.alias).join(' ')
     };
@@ -1666,7 +1773,7 @@ function faqReport(exp) {
 
 const FAQ_COLUMNS = [
   { key: 'microsite', label: 'Microsite' }, { key: 'micrositeNid', label: 'Microsite nid' }, { key: 'wouldGoOn', label: 'Would go on' },
-  { key: 'category', label: 'FAQ category' }, { key: 'count', label: 'FAQs' }, { key: 'published', label: 'Published' },
+  { key: 'category', label: 'FAQ category' }, { key: 'onPages', label: 'Shown on D10 pages (become accordions)' }, { key: 'count', label: 'FAQs' }, { key: 'published', label: 'Published' },
   { key: 'questions', label: 'Questions (in weight order)' }, { key: 'nids', label: 'FAQ nids' }, { key: 'oldUrls', label: 'Old URLs' }
 ];
 
@@ -1678,7 +1785,7 @@ function outOfScopeReport(exp) {
     rows.push({ type, records: recs.length, published: recs.filter(r => r && r.is_published === true).length, note });
   };
   const r = exp.raw;
-  count('FAQs', r.faqs, 'Module content. See the FAQ report for where each group would go.');
+  count('FAQs', r.faqs, 'Imported as accordions on the pages whose FAQ sections show them (content mode). FAQs no page shows are not imported; see the FAQ report.');
   count('Meetings', r.meetings, 'Module content (agendas and minutes).');
   count('Directory listings', r.directory_listings, 'Module content.');
   count('Business directory', r.business_directory, 'Module content.');
@@ -2053,7 +2160,7 @@ module.exports = { start };
 const man = require('./lib/manifest');
 const { INTERIOR_STANDARD_LAYOUT_ID } = require('./api/streamline');
 const { RUN_LOCKED } = require('./lib/plan');
-const { buildPageContent } = require('./lib/content');
+const { buildPageContent, linkedPageKeys } = require('./lib/content');
 
 class StopRequested extends Error { constructor() { super('Stopped by user'); this.name = 'StopRequested'; } }
 
@@ -2205,66 +2312,79 @@ async function uploadMediaPhase(media, ctx, check, save) {
 
 async function contentPhase(plan, ctx, check, save) {
   const { api, manifest: m, log, idx } = ctx;
-  const pattern = await resolvePageUrlPattern(api, m, plan.options, log);
-  save();
+  const opts = { includeAttachments: plan.options.includeAttachments };
+  await resolvePageUrls(plan, ctx, save);
+  const pattern = plan.options.pageUrlPattern !== 'auto' ? plan.options.pageUrlPattern : null;
   const lookups = {
-    pageUrl: key => (m.pages[key] && m.pages[key].slug != null ? pattern.replace('{slug}', m.pages[key].slug) : null),
+    pageUrl: key => {
+      const r = m.pages[key];
+      if (!r) return null;
+      if (r.url) return r.url;
+      return pattern && r.slug != null ? pattern.replace('{slug}', r.slug) : null;
+    },
     media: mid => (m.media[mid] ? { url: m.media[mid].url, id: m.media[mid].streamlineId, altText: m.media[mid].altText } : null)
   };
-  let written = 0, empty = 0;
+  let written = 0, empty = 0, accordions = 0;
   for (const p of plan.pages) {
     check();
     const rec = m.pages[p.key];
     if (p.content !== 'content' || man.pageStageAtLeast(rec, 'content')) continue;
-    const c = buildPageContent(p, idx, lookups, { includeAttachments: plan.options.includeAttachments });
-    if (c.empty) { man.setPageStage(m, p.key, 'content', { contentEmpty: true }); save(); empty++; continue; }
-    let sectionId = rec.sectionId;
-    if (!sectionId) {
+    const c = buildPageContent(p, idx, lookups, opts);
+    if (c.empty && !c.faqs.length) { man.setPageStage(m, p.key, 'content', { contentEmpty: true }); save(); empty++; continue; }
+
+    // The main column, looked up once per page and only when a section still has to be added.
+    let mainId = null;
+    const main = async () => {
+      if (mainId) return mainId;
       const cols = await api.draftColumns(rec.streamlineId);
-      const main = cols.find(col => col.columnType === 'main');
-      if (!main) throw new Error('Page "' + p.title + '" has no main column (columns: ' + cols.map(col => col.columnType).join(', ') + ')');
-      sectionId = await api.addSection(rec.streamlineId, 'Freeform', main.id, 1);
-      man.setPageStage(m, p.key, 'section', { sectionId });
-      save();
+      const col = cols.find(x => x.columnType === 'main');
+      if (!col) throw new Error('Page "' + p.title + '" has no main column (columns: ' + cols.map(x => x.columnType).join(', ') + ')');
+      return (mainId = col.id);
+    };
+
+    // Body first (weight 1), then one accordion per FAQ, in D10 order. Each section id is saved as soon as it
+    // exists, so a resume fills in the same sections instead of adding new ones.
+    if (!c.empty) {
+      if (!rec.sectionId) {
+        man.setPageStage(m, p.key, 'section', { sectionId: await api.addSection(rec.streamlineId, 'Freeform', await main(), 1) });
+        save();
+      }
+      await api.setFreeform(m.pages[p.key].sectionId, c.html, c.json);
     }
-    await api.setFreeform(sectionId, c.html, c.json);
+    const faqIds = (m.pages[p.key].faqSectionIds || []).slice();
+    for (let i = 0; i < c.faqs.length; i++) {
+      check();
+      const q = c.faqs[i];
+      if (!faqIds[i]) {
+        faqIds[i] = await api.addSection(rec.streamlineId, 'Freeform', await main(), (c.empty ? 1 : 2) + i);
+        man.recordPage(m, p.key, { faqSectionIds: faqIds.slice() });
+        save();
+      }
+      await api.setFreeform(faqIds[i], q.html, q.json);
+      await api.setFreeformPreferences(faqIds[i], { accordion: true, accordionTitle: q.question });
+      accordions++;
+    }
     const oldSite = c.links.filter(l => l.outcome === 'old-site').length;
-    man.setPageStage(m, p.key, 'content', { contentWarnings: c.warnings.length, linksToOldSite: oldSite });
+    man.setPageStage(m, p.key, 'content', { contentWarnings: c.warnings.length, linksToOldSite: oldSite, faqs: c.faqs.length });
     save();
     written++;
     if (written % 25 === 0) log('  … ' + written + ' pages written');
   }
-  log('  ' + written + ' written, ' + empty + ' had no body');
+  log('  ' + written + ' written' + (accordions ? ' (' + accordions + ' FAQ accordions)' : '') + ', ' + empty + ' had no body');
 }
 
-// Page URLs on the new site come from the slug, but the schema has no public URL field. With 'auto', the pattern
-// is worked out by opening existing published pages under each candidate pattern and checking for their title.
-const URL_PATTERNS = ['/{slug}', '/page/{slug}', '/pages/{slug}'];
-async function resolvePageUrlPattern(api, m, options, log) {
-  if (m.pageUrlPattern) return m.pageUrlPattern;
-  if (options.pageUrlPattern && options.pageUrlPattern !== 'auto') {
-    m.pageUrlPattern = options.pageUrlPattern;
-    log('Page URLs: ' + m.pageUrlPattern + ' (from options)');
-    return m.pageUrlPattern;
+// Links between imported pages need each page's address on the new site. The CMS reports it on the page's
+// record (GET /api/pocs/{id} -> url), so it is read from there for every page the content links to, and kept
+// in the manifest. A "Page URL pattern" set in Options (e.g. /{slug}) is used instead when given.
+async function resolvePageUrls(plan, ctx, save) {
+  const { api, manifest: m, log, idx } = ctx;
+  if (plan.options.pageUrlPattern !== 'auto') { log('  page addresses: ' + plan.options.pageUrlPattern + ' (from Options)'); return; }
+  const keys = [...linkedPageKeys(plan, idx, { includeAttachments: plan.options.includeAttachments })].filter(k => m.pages[k] && !m.pages[k].url);
+  for (const k of keys) {
+    man.recordPage(m, k, { url: await api.pageUrl(m.pages[k].streamlineId) });
+    save();
   }
-  const ours = new Set(Object.values(m.pages).map(r => String(r.streamlineId)));
-  const samples = (await api.listPages())
-    .filter(p => !p.unpublished && p.slug && p.activePageVersion && !ours.has(String(p.id)) && /[a-z]{3}/i.test(p.amplifyTitle || ''))
-    .slice(0, 3);
-  const unescape = s => s.replace(/&amp;/g, '&').replace(/&#39;|&#x27;/g, "'").replace(/&quot;/g, '"');
-  for (const pat of URL_PATTERNS) {
-    for (const s of samples) {
-      const r = await api.probe(pat.replace('{slug}', s.slug));
-      if (r.status === 200 && unescape(r.text).toLowerCase().includes(String(s.amplifyTitle).toLowerCase())) {
-        m.pageUrlPattern = pat;
-        log('Page URLs: ' + pat + ' (checked against "' + s.amplifyTitle + '")');
-        return pat;
-      }
-    }
-  }
-  throw new Error('Could not work out how page URLs look on this site' +
-    (samples.length ? ' (tried ' + URL_PATTERNS.join(', ') + ' on ' + samples.map(s => '"' + s.amplifyTitle + '"').join(', ') + ')' : ' (no published pages to check against)') +
-    '. Set "Page URL pattern" in Options, e.g. /{slug}.');
+  if (keys.length) log('  looked up ' + keys.length + ' page address(es) for links between pages');
 }
 
 // Finds the InteriorStandard layout on this site: the known id first, then by name. Never guesses between several.
@@ -2779,13 +2899,15 @@ function openPanel() {
         body.appendChild(checkbox('List each page\'s file attachments under a "Documents" heading', o.includeAttachments, v => { o.includeAttachments = v; }));
         body.appendChild(checkbox('Upload the files and images pages link to, and point the links at them', o.uploadMedia, v => { o.uploadMedia = v; }));
         body.appendChild(note('Off: links to files keep pointing at the old site. Downloads come from the old site, so Tampermonkey asks once to allow it.'));
+        body.appendChild(checkbox('Turn D10 FAQ sections into accordions (one per question, in the main column)', o.faqAccordions, v => { o.faqAccordions = v; }));
+        body.appendChild(note('Streamline only allows link cards in the right column, so FAQs go under the page body.'));
         const row = h('label', '', 'display:block;margin:8px 0;');
         row.appendChild(document.createTextNode('Page URL pattern: '));
-        const pat = document.createElement('input'); pat.type = 'text'; pat.value = o.pageUrlPattern === 'auto' ? '' : o.pageUrlPattern; pat.placeholder = 'auto (checked against an existing page)'; pat.style.cssText = 'width:280px;';
+        const pat = document.createElement('input'); pat.type = 'text'; pat.value = o.pageUrlPattern === 'auto' ? '' : o.pageUrlPattern; pat.placeholder = 'auto (each page\'s address from the CMS)'; pat.style.cssText = 'width:280px;';
         pat.oninput = () => { o.pageUrlPattern = pat.value.trim() || 'auto'; };
         row.appendChild(pat);
         body.appendChild(row);
-        body.appendChild(note('Used for links between imported pages. Leave blank to work it out, or enter something like /{slug}.'));
+        body.appendChild(note('Used for links between imported pages. Leave blank: the tool reads each page\'s address from the CMS. Only set it (e.g. /{slug}) if that fails.'));
       }
 
       body.appendChild(heading('Pages that are unpublished in D10'));
@@ -2828,9 +2950,11 @@ function openPanel() {
       'Will create ' + p.pages.length + ' pages and ' + p.menu.length + ' primary menu items (' + tops + ' at the top level).',
       'Pages imported as unpublished: ' + p.pages.filter(x => x.unpublished).length + '.',
       o.pageContent === 'content'
-        ? 'Content: ' + [...pv.byKey.values()].filter(c => !c.empty).length + ' pages get their D10 body' + (o.includeAttachments ? ' and attachments' : '') + '; ' + (p.pages.length - [...pv.byKey.values()].filter(c => !c.empty).length) + ' stay empty (no body in D10).'
+        ? 'Content: ' + [...pv.byKey.values()].filter(c => !c.empty).length + ' pages get their D10 body' + (o.includeAttachments ? ' and attachments' : '') + '; ' + (p.pages.length - [...pv.byKey.values()].filter(c => !c.empty || c.faqs.length).length) + ' stay empty (no body in D10).'
         : 'All pages are empty (title only).'
     ];
+    const faqPages = p.pages.filter(x => x.faqs && x.faqs.length);
+    if (faqPages.length) lines.push('FAQ accordions: ' + faqPages.reduce((s, x) => s + x.faqs.length, 0) + ' on ' + faqPages.length + ' page(s): ' + faqPages.slice(0, 5).map(x => x.title + ' (' + x.faqs.length + ')').join(', ') + (faqPages.length > 5 ? ', …' : '') + '.');
     const missingAtt = pv.warnings.filter(w => /attachment-missing/.test(w)).length;
     if (missingAtt) lines.push('Attachments missing from www-media.json: ' + missingAtt + ' (no file to link to; listed in the warnings file).');
     if (p.media.length) lines.push('Media to upload: ' + p.media.length + ' (' + p.media.filter(mid => (state.idx.media.get(mid) || {}).kind === 'image').length + ' images).');
@@ -2863,11 +2987,16 @@ function openPanel() {
     if (pv.byKey.size) {
       panel.appendChild(heading('Content preview'));
       const sel = document.createElement('select'); sel.style.cssText = 'max-width:100%;';
-      const withBody = p.pages.filter(x => pv.byKey.has(x.key) && !pv.byKey.get(x.key).empty);
-      for (const x of withBody) { const op = document.createElement('option'); op.value = x.key; op.textContent = x.title + ' (nid ' + x.nid + ')'; sel.appendChild(op); }
+      const withBody = p.pages.filter(x => pv.byKey.has(x.key) && (!pv.byKey.get(x.key).empty || pv.byKey.get(x.key).faqs.length));
+      for (const x of withBody) { const op = document.createElement('option'); op.value = x.key; op.textContent = x.title + ' (nid ' + x.nid + ')' + (x.faqs.length ? ' · ' + x.faqs.length + ' FAQs' : ''); sel.appendChild(op); }
       const view = h('div', null, 'border:1px solid #ddd;border-radius:4px;padding:10px 14px;margin-top:6px;max-height:300px;overflow:auto;font-size:14px;line-height:1.5;');
       // The html is generated by the converter from escaped text, so it is safe to show here.
-      const show = () => { const c = pv.byKey.get(sel.value); view.innerHTML = c ? c.html : ''; };
+      // FAQs show as <details> so they open and close the way the accordions will.
+      const qEsc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;');
+      const show = () => {
+        const c = pv.byKey.get(sel.value);
+        view.innerHTML = !c ? '' : (c.empty ? '' : c.html) + c.faqs.map(f => '<details style="border:1px solid #2760b0;border-radius:4px;margin:8px 0;padding:6px 10px;"><summary style="cursor:pointer;font-weight:600;color:#2760b0;">' + qEsc(f.question) + '</summary>' + f.html + '</details>').join('');
+      };
       sel.onchange = show;
       panel.appendChild(sel); panel.appendChild(view);
       show();
@@ -3081,5 +3210,5 @@ module.exports = { openPanel, setPlatform };
     });
     return module.exports;
   }
-  load('main').start("0.3.0");
+  load('main').start("0.4.0");
 })();
