@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Drupal 10 to Streamline Importer
 // @namespace    civicplus.streamline.d10importer
-// @version      0.6.1
+// @version      0.6.2
 // @description  Create Streamline pages and the primary menu from a Drupal 10 export (www-*.json). Runs on any Streamline CMS admin page; does nothing elsewhere.
 // @match        https://*/*
 // @require      https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js

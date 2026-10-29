@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Drupal 10 to Streamline Importer
 // @namespace    civicplus.streamline.d10importer
-// @version      0.6.1
+// @version      0.6.2
 // @description  Create Streamline pages and the primary menu from a Drupal 10 export (www-*.json). Runs on any Streamline CMS admin page; does nothing elsewhere.
 // @match        https://*/*
 // @require      https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js
@@ -12,7 +12,7 @@
 // @updateURL    https://raw.githubusercontent.com/DavidHazelwoodCivicPlus/streamline-importer-releases/main/dist/streamline-importer.meta.js
 // @downloadURL  https://raw.githubusercontent.com/DavidHazelwoodCivicPlus/streamline-importer-releases/main/dist/streamline-importer.user.js
 // ==/UserScript==
-// Built 2026-10-29T16:32:56.319Z. Do not edit; edit src/ and run "npm run build".
+// Built 2026-10-29T18:21:16.737Z. Do not edit; edit src/ and run "npm run build".
 
 (function () {
   'use strict';
@@ -3278,7 +3278,8 @@ function openPanel() {
       if (state.exp.errors.length) { msg.textContent = 'Fix the problems listed above first.'; return; }
       viewOptions();
     }, true));
-    foot.appendChild(btn('Resume, undo, other actions', viewManage));
+    foot.appendChild(btn('Resume, undo, other actions', () => viewManage()));
+    foot.appendChild(btn('Erase this site…', () => viewManage({ erase: true })));
     foot.appendChild(btn('Close', close));
     panel.appendChild(foot);
   }
@@ -3575,7 +3576,8 @@ function openPanel() {
   }
 
   // ---- Resume, undo, manifest, schema, remove all ----
-  function viewManage() {
+  // opts.erase: open the "Erase this site" box and scroll to it (the first screen's Erase button).
+  function viewManage(opts) {
     clear();
     title('Resume, undo, other actions');
     const status = box();
@@ -3654,6 +3656,7 @@ function openPanel() {
     wType.oninput = wSync; wSync();
     erase.appendChild(wBtn);
     panel.appendChild(erase);
+    if (opts && opts.erase) { erase.open = true; setTimeout(() => { erase.scrollIntoView({ block: 'center' }); wType.focus(); }, 0); }
 
     panel.appendChild(msg);
     const foot = h('div', '', 'margin-top:14px;');
@@ -3686,5 +3689,5 @@ module.exports = { openPanel, setPlatform };
     });
     return module.exports;
   }
-  load('main').start("0.6.1");
+  load('main').start("0.6.2");
 })();

@@ -281,7 +281,8 @@ function openPanel() {
       if (state.exp.errors.length) { msg.textContent = 'Fix the problems listed above first.'; return; }
       viewOptions();
     }, true));
-    foot.appendChild(btn('Resume, undo, other actions', viewManage));
+    foot.appendChild(btn('Resume, undo, other actions', () => viewManage()));
+    foot.appendChild(btn('Erase this site…', () => viewManage({ erase: true })));
     foot.appendChild(btn('Close', close));
     panel.appendChild(foot);
   }
@@ -578,7 +579,8 @@ function openPanel() {
   }
 
   // ---- Resume, undo, manifest, schema, remove all ----
-  function viewManage() {
+  // opts.erase: open the "Erase this site" box and scroll to it (the first screen's Erase button).
+  function viewManage(opts) {
     clear();
     title('Resume, undo, other actions');
     const status = box();
@@ -657,6 +659,7 @@ function openPanel() {
     wType.oninput = wSync; wSync();
     erase.appendChild(wBtn);
     panel.appendChild(erase);
+    if (opts && opts.erase) { erase.open = true; setTimeout(() => { erase.scrollIntoView({ block: 'center' }); wType.focus(); }, 0); }
 
     panel.appendChild(msg);
     const foot = h('div', '', 'margin-top:14px;');
