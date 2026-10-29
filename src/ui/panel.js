@@ -15,7 +15,7 @@ const { faqReport, FAQ_COLUMNS, outOfScopeReport, OUT_OF_SCOPE_COLUMNS } = requi
 const man = require('../lib/manifest');
 const { makeClient, browserTransport, ApiError, SANDBOX_HOST } = require('../api/client');
 const { streamlineApi } = require('../api/streamline');
-const { runPlan, undoRun, removeAllMenuItems, StopRequested } = require('../runner');
+const { runPlan, undoRun, removeAllMenuItems, wipeSite, StopRequested } = require('../runner');
 const { INTROSPECTION, toSdl, checkSchema } = require('../lib/schema');
 
 const RED = '#b3121b';
@@ -514,9 +514,9 @@ function openPanel() {
   }
 
   // ---- Progress (run, undo, remove all) ----
-  function viewProgress(kind) {
+  function viewProgress(kind, wipeOpts) {
     clear();
-    title(kind === 'run' ? 'Running' : kind === 'undo' ? 'Undoing' : 'Removing all primary items');
+    title(kind === 'run' ? 'Running' : kind === 'undo' ? 'Undoing' : kind === 'wipe' ? 'Erasing ' + location.host : 'Removing all primary items');
     const logBox = box('font:13px/1.5 monospace;white-space:pre-wrap;max-height:360px;overflow:auto;');
     panel.appendChild(logBox);
     const log = msg => { logBox.textContent += msg + '\n'; logBox.scrollTop = logBox.scrollHeight; console.log('[Importer] ' + msg); };
@@ -566,6 +566,14 @@ function openPanel() {
     } else if (kind === 'removeAll') {
       removeAllMenuItems(a, 'primary', snap => saveFile(JSON.stringify(snap, null, 2), 'snapshot-primary-' + stamp() + '.json'), log)
         .then(() => { log('✓ Primary menu is empty'); done(true); }, fail);
+    } else if (kind === 'wipe') {
+      wipeSite(a, wipeOpts, { log, shouldStop: () => stop, host: location.host, snapshot: snap => saveFile(JSON.stringify(snap, null, 2), 'erase-snapshot-' + location.host.replace(/[^w.-]+/g, '_') + '-' + stamp() + '.json') })
+        .then(s => {
+          // Everything a recorded run made is gone too, so its manifest no longer means anything here.
+          clearStoredManifest(); state.manifest = null;
+          log('✓ Erased: ' + s.menuItems + ' menu items, ' + s.pages + ' pages' + (wipeOpts.media ? ', ' + s.files + ' files, ' + s.images + ' images' : '') + '. The homepage stays.');
+          done(true);
+        }, fail);
     }
   }
 
@@ -628,6 +636,27 @@ function openPanel() {
     details.appendChild(h('p', 'Removes every item in the primary menu, including the site\'s own items. Pages are not deleted. A snapshot downloads first.', 'margin:8px 0 0;color:' + RED + ';'));
     details.appendChild(btn('Remove ALL primary items', () => { if (confirmChange('Remove every item in the primary menu of ' + location.host + '?')) viewProgress('removeAll'); }));
     panel.appendChild(details);
+
+    // Erase this site: for clearing a test site between imports.
+    const erase = h('details', null, 'margin-top:14px;border:2px solid ' + RED + ';border-radius:4px;padding:8px 10px;');
+    erase.appendChild(h('summary', 'Erase this site (for test sites)', 'cursor:pointer;font-weight:700;color:' + RED + ';'));
+    erase.appendChild(h('p', 'Deletes every menu item in every menu and every page on ' + location.host + ' (events, meetings and groups too), whoever made them. The homepage, forms, users and settings stay. A list of everything it deletes downloads first. Deleted pages cannot be brought back.', 'margin:8px 0;color:' + RED + ';'));
+    const wipeMedia = checkbox('Also delete every uploaded file and image (site design images such as the header and homepage photos live there too)', false, () => {});
+    erase.appendChild(wipeMedia);
+    const wRow = h('label', '', 'display:block;margin:8px 0;font-size:13px;');
+    const phrase = 'WIPE ' + location.host;
+    wRow.appendChild(document.createTextNode('Type ' + phrase + ' to confirm: '));
+    const wType = document.createElement('input'); wType.type = 'text'; wType.style.cssText = 'width:320px;';
+    wRow.appendChild(wType);
+    erase.appendChild(wRow);
+    const wBtn = btn('Erase this site', () => {
+      if (wType.value.trim() !== phrase) return;
+      viewProgress('wipe', { media: wipeMedia.querySelector('input').checked });
+    }, true);
+    const wSync = () => { const ok = wType.value.trim() === phrase; wBtn.disabled = !ok; wBtn.style.opacity = ok ? '1' : '.4'; };
+    wType.oninput = wSync; wSync();
+    erase.appendChild(wBtn);
+    panel.appendChild(erase);
 
     panel.appendChild(msg);
     const foot = h('div', '', 'margin-top:14px;');

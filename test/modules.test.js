@@ -54,8 +54,7 @@ test('plan: listing page with cards, entry pages, menu item; embedded pages beco
   const idx = buildLinkIndex(exp);
   const p = buildPlan(buildNavFromD10(exp).tree, { modules: ['jobs', 'news'] }, idx, exp);
   const list = p.pages.find(x => x.key === 'list:jobs');
-  assert.deepEqual(list.cards, [{ column: 'main', title: '', keys: ['jobs:501', 'jobs:502'], orderBy: 'alphabetical_by_title', perPage: 12 }]);
-  assert.equal(p.pages.find(x => x.key === 'list:news').cards[0].orderBy, 'date_published');
+  assert.deepEqual(list.cards, [{ column: 'main', title: '', keys: ['jobs:501', 'jobs:502'], orderBy: 'manual', perPage: 12 }]);
   assert.ok(p.menu.some(m => m.pageKey === 'list:jobs' && m.level === 1));
   assert.equal(p.pages.find(x => x.key === 'jobs:501').content, 'content', 'entries get content even in empty mode');
   const water = p.pages.find(x => x.title === 'Water');
@@ -107,7 +106,7 @@ test('run: listing page gets a main-column card section, Water gets right-column
   const listing = teaserSecs.find(s => s.pageId === byTitle('Job Openings'));
   assert.equal(listing.columnId, 'main-' + byTitle('Job Openings'));
   assert.deepEqual(listing.teasers, [byTitle('Clerk'), byTitle('Zoo keeper')]);
-  assert.equal(listing.prefs.orderByIndex, 'alphabetical_by_title');
+  assert.equal(listing.prefs.orderByIndex, 'manual');
   const water = teaserSecs.find(s => s.pageId === byTitle('Water'));
   assert.equal(water.columnId, 'gutter-' + byTitle('Water'));
   assert.deepEqual(water.teasers, [byTitle('Billing'), byTitle('Clerk'), byTitle('Main break')]);

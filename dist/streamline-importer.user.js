@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Drupal 10 to Streamline Importer
 // @namespace    civicplus.streamline.d10importer
-// @version      0.5.0
+// @version      0.6.0
 // @description  Create Streamline pages and the primary menu from a Drupal 10 export (www-*.json). Runs on any Streamline CMS admin page; does nothing elsewhere.
 // @match        https://*/*
 // @require      https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js
@@ -12,7 +12,7 @@
 // @updateURL    https://raw.githubusercontent.com/DavidHazelwoodCivicPlus/streamline-importer-releases/main/dist/streamline-importer.meta.js
 // @downloadURL  https://raw.githubusercontent.com/DavidHazelwoodCivicPlus/streamline-importer-releases/main/dist/streamline-importer.user.js
 // ==/UserScript==
-// Built 2026-10-29T15:36:00.075Z. Do not edit; edit src/ and run "npm run build".
+// Built 2026-10-29T15:48:59.388Z. Do not edit; edit src/ and run "npm run build".
 
 (function () {
   'use strict';
@@ -301,6 +301,28 @@ function streamlineApi(client, opts) {
     await gql('mutation($i: ' + (kind === 'image' ? 'DeleteImageMutationInput!' : 'DeleteFileMutationInput!') + ') { ' + m + '(input: $i) { clientMutationId } }', { i: { id } });
   }
 
+  // ---------- Whole-site listings (for "Erase this site") ----------
+  // pocs, files and images are Relay connections; each is read to the end, 100 at a time.
+  async function readAll(field, query, vars) {
+    const out = [];
+    let after = null;
+    for (let guard = 0; ; guard++) {
+      if (guard >= 500) throw new Error('Stopped listing ' + field + ' after 500 batches');
+      const d = await gql(query, Object.assign({ after }, vars || {}));
+      const c = d[field];
+      out.push(...(c.nodes || []).filter(Boolean));
+      if (!c.pageInfo.hasNextPage) return out;
+      after = c.pageInfo.endCursor;
+    }
+  }
+  const listAllPocs = () => readAll('pocs', 'query($after: String) { pocs(first: 100, after: $after, hideEvents: false) { nodes { id title pocTypeName canDelete unpublished } pageInfo { hasNextPage endCursor } } }');
+  const listFiles = () => readAll('files', 'query($after: String) { files(first: 100, after: $after) { nodes { id basename } pageInfo { hasNextPage endCursor } } }');
+  const listImages = () => readAll('images', 'query($after: String) { images(first: 100, after: $after) { nodes { id basename type } pageInfo { hasNextPage endCursor } } }');
+  async function listMenus() {
+    const ms = await request('GET', '/api/menus');
+    return Array.isArray(ms) ? ms : (ms && ms.menus) || [];
+  }
+
   // ---------- Menus ----------
   async function menuIdFor(name) {
     const ms = await request('GET', '/api/menus');
@@ -343,6 +365,7 @@ function streamlineApi(client, opts) {
   return {
     createPage, draftColumns, addSection, setFreeform, promoteDraft, deletePage, listPages, listLayouts,
     uploadMedia, deleteMedia, setFreeformPreferences, setTeaserPreferences, addTeasers, pageUrl,
+    listAllPocs, listFiles, listImages, listMenus,
     menuIdFor, menuItems, createMenuItem, softDeleteMenuItem
   };
 }
@@ -1900,7 +1923,9 @@ function buildPlan(tree, options, idx, exp) {
     pages.push({
       key: listKey, title: def.label, sourceType: 'listing', nid: '', alias: '', sourcePublished: true, unpublished: false,
       content: 'empty', hasBody: false, notes: [], bodyHtml: '', attachments: [], faqs: [], embedded: [], row: null, moduleType: type,
-      cards: entries.length ? [{ column: 'main', title: '', keys: entries.map(e => e.key), orderBy: def.order, perPage: 12 }] : []
+      // Always manual: with any other order the CMS does not show the cards added to the section (sandbox,
+      // 2026-10-29). The entries are already in the module's order (A-Z, news newest first).
+      cards: entries.length ? [{ column: 'main', title: '', keys: entries.map(e => e.key), orderBy: 'manual', perPage: 12 }] : []
     });
     if (opts.moduleMenu) menu.push({ key: 'menu:' + listKey, pageKey: listKey, parentKey: null, weight: topWeight++, title: def.label, level: 1, path: '', row: null });
     for (const e of entries) {
@@ -2777,6 +2802,62 @@ async function undoRun(ctx) {
   log('Undo finished');
 }
 
+// Kinds of content "Erase this site" deletes. The homepage stays (the site needs it), and so do products
+// (payments) and profiles, which are not page content.
+const WIPE_POC_TYPES = ['page', 'event', 'meeting', 'group', 'external'];
+
+// Clears a site for a fresh test import: every menu item in every menu, every page (not the homepage), and,
+// when opts.media is set, every uploaded file and image. snapshot(obj) receives the full list of what is about
+// to go before anything is deleted. Safe to run again after a stop: it only ever deletes what is still there.
+async function wipeSite(api, opts, ctx) {
+  const { log } = ctx;
+  const check = () => { if (ctx.shouldStop && ctx.shouldStop()) throw new StopRequested(); };
+  log('Reading the site…');
+  const menus = await api.listMenus();
+  const items = {};
+  for (const mnu of menus) items[mnu.name] = await api.menuItems(mnu.id);
+  const pocs = (await api.listAllPocs()).filter(p => WIPE_POC_TYPES.includes(p.pocTypeName) && p.canDelete !== false);
+  const files = opts.media ? await api.listFiles() : [];
+  const images = opts.media ? (await api.listImages()).filter(i => i.type !== 'Video') : [];
+  ctx.snapshot({ host: ctx.host, takenAt: new Date().toISOString(), menus, menuItems: items, pages: pocs, files, images });
+  const itemCount = Object.values(items).reduce((s, a) => s + a.length, 0);
+  log('Deleting ' + itemCount + ' menu item(s) in ' + menus.length + ' menu(s), ' + pocs.length + ' page(s)' + (opts.media ? ', ' + files.length + ' file(s) and ' + images.length + ' image(s)' : '') + '.');
+
+  // Menus first, children before parents, re-reading until none are left (as removeAllMenuItems does).
+  for (const mnu of menus) {
+    for (let pass = 0; pass < 4; pass++) {
+      const live = await api.menuItems(mnu.id);
+      if (!live.length) break;
+      const byId = new Map(live.map(i => [String(i.id), i]));
+      const depth = i => { let d = 0, p = i.parent_id; while (p != null && byId.has(String(p)) && d < 20) { d++; p = byId.get(String(p)).parent_id; } return d; };
+      for (const it of live.sort((a, b) => depth(b) - depth(a))) { check(); await api.softDeleteMenuItem(it); }
+    }
+    const left = await api.menuItems(mnu.id);
+    if (left.length) throw new Error(left.length + ' item(s) still in the ' + mnu.name + ' menu: ' + left.slice(0, 5).map(i => i.title).join(', '));
+  }
+  log('  menus cleared');
+
+  let n = 0;
+  for (const p of pocs) {
+    check();
+    await api.deletePage(p.id);
+    if (++n % 25 === 0) log('  … ' + n + ' / ' + pocs.length + ' pages');
+  }
+  log('  ' + n + ' page(s) deleted');
+
+  if (opts.media) {
+    let f = 0, im = 0;
+    for (const x of files) { check(); await api.deleteMedia('file', x.id).catch(e => { if (!/not found|could not find|couldn.t find/i.test(e.message)) throw e; }); if (++f % 25 === 0) log('  … ' + f + ' / ' + files.length + ' files'); }
+    for (const x of images) { check(); await api.deleteMedia('image', x.id).catch(e => { if (!/not found|could not find|couldn.t find/i.test(e.message)) throw e; }); if (++im % 25 === 0) log('  … ' + im + ' / ' + images.length + ' images'); }
+    log('  ' + f + ' file(s) and ' + im + ' image(s) deleted');
+  }
+
+  // What is left, as a check.
+  const pagesLeft = (await api.listAllPocs()).filter(p => WIPE_POC_TYPES.includes(p.pocTypeName) && p.canDelete !== false).length;
+  if (pagesLeft) throw new Error(pagesLeft + ' page(s) are still on the site; run Erase again');
+  return { menuItems: itemCount, pages: n, files: files.length, images: images.length };
+}
+
 // Removes every live item in a menu, after handing a snapshot to the caller (user6 behaviour).
 async function removeAllMenuItems(api, menuName, snapshot, log) {
   const menuId = await api.menuIdFor(menuName);
@@ -2792,7 +2873,7 @@ async function removeAllMenuItems(api, menuName, snapshot, log) {
   if (left.length) throw new Error(left.length + ' item(s) still live in ' + menuName + ': ' + left.slice(0, 5).map(i => i.title).join(', '));
 }
 
-module.exports = { runPlan, undoRun, removeAllMenuItems, StopRequested };
+module.exports = { runPlan, undoRun, removeAllMenuItems, wipeSite, WIPE_POC_TYPES, StopRequested };
 
   },
   "ui/dock": function (module, exports, require) {
@@ -2907,7 +2988,7 @@ const { faqReport, FAQ_COLUMNS, outOfScopeReport, OUT_OF_SCOPE_COLUMNS } = requi
 const man = require('../lib/manifest');
 const { makeClient, browserTransport, ApiError, SANDBOX_HOST } = require('../api/client');
 const { streamlineApi } = require('../api/streamline');
-const { runPlan, undoRun, removeAllMenuItems, StopRequested } = require('../runner');
+const { runPlan, undoRun, removeAllMenuItems, wipeSite, StopRequested } = require('../runner');
 const { INTROSPECTION, toSdl, checkSchema } = require('../lib/schema');
 
 const RED = '#b3121b';
@@ -3406,9 +3487,9 @@ function openPanel() {
   }
 
   // ---- Progress (run, undo, remove all) ----
-  function viewProgress(kind) {
+  function viewProgress(kind, wipeOpts) {
     clear();
-    title(kind === 'run' ? 'Running' : kind === 'undo' ? 'Undoing' : 'Removing all primary items');
+    title(kind === 'run' ? 'Running' : kind === 'undo' ? 'Undoing' : kind === 'wipe' ? 'Erasing ' + location.host : 'Removing all primary items');
     const logBox = box('font:13px/1.5 monospace;white-space:pre-wrap;max-height:360px;overflow:auto;');
     panel.appendChild(logBox);
     const log = msg => { logBox.textContent += msg + '\n'; logBox.scrollTop = logBox.scrollHeight; console.log('[Importer] ' + msg); };
@@ -3458,6 +3539,14 @@ function openPanel() {
     } else if (kind === 'removeAll') {
       removeAllMenuItems(a, 'primary', snap => saveFile(JSON.stringify(snap, null, 2), 'snapshot-primary-' + stamp() + '.json'), log)
         .then(() => { log('✓ Primary menu is empty'); done(true); }, fail);
+    } else if (kind === 'wipe') {
+      wipeSite(a, wipeOpts, { log, shouldStop: () => stop, host: location.host, snapshot: snap => saveFile(JSON.stringify(snap, null, 2), 'erase-snapshot-' + location.host.replace(/[^w.-]+/g, '_') + '-' + stamp() + '.json') })
+        .then(s => {
+          // Everything a recorded run made is gone too, so its manifest no longer means anything here.
+          clearStoredManifest(); state.manifest = null;
+          log('✓ Erased: ' + s.menuItems + ' menu items, ' + s.pages + ' pages' + (wipeOpts.media ? ', ' + s.files + ' files, ' + s.images + ' images' : '') + '. The homepage stays.');
+          done(true);
+        }, fail);
     }
   }
 
@@ -3521,6 +3610,27 @@ function openPanel() {
     details.appendChild(btn('Remove ALL primary items', () => { if (confirmChange('Remove every item in the primary menu of ' + location.host + '?')) viewProgress('removeAll'); }));
     panel.appendChild(details);
 
+    // Erase this site: for clearing a test site between imports.
+    const erase = h('details', null, 'margin-top:14px;border:2px solid ' + RED + ';border-radius:4px;padding:8px 10px;');
+    erase.appendChild(h('summary', 'Erase this site (for test sites)', 'cursor:pointer;font-weight:700;color:' + RED + ';'));
+    erase.appendChild(h('p', 'Deletes every menu item in every menu and every page on ' + location.host + ' (events, meetings and groups too), whoever made them. The homepage, forms, users and settings stay. A list of everything it deletes downloads first. Deleted pages cannot be brought back.', 'margin:8px 0;color:' + RED + ';'));
+    const wipeMedia = checkbox('Also delete every uploaded file and image (site design images such as the header and homepage photos live there too)', false, () => {});
+    erase.appendChild(wipeMedia);
+    const wRow = h('label', '', 'display:block;margin:8px 0;font-size:13px;');
+    const phrase = 'WIPE ' + location.host;
+    wRow.appendChild(document.createTextNode('Type ' + phrase + ' to confirm: '));
+    const wType = document.createElement('input'); wType.type = 'text'; wType.style.cssText = 'width:320px;';
+    wRow.appendChild(wType);
+    erase.appendChild(wRow);
+    const wBtn = btn('Erase this site', () => {
+      if (wType.value.trim() !== phrase) return;
+      viewProgress('wipe', { media: wipeMedia.querySelector('input').checked });
+    }, true);
+    const wSync = () => { const ok = wType.value.trim() === phrase; wBtn.disabled = !ok; wBtn.style.opacity = ok ? '1' : '.4'; };
+    wType.oninput = wSync; wSync();
+    erase.appendChild(wBtn);
+    panel.appendChild(erase);
+
     panel.appendChild(msg);
     const foot = h('div', '', 'margin-top:14px;');
     foot.appendChild(btn('Back', viewLoad));
@@ -3552,5 +3662,5 @@ module.exports = { openPanel, setPlatform };
     });
     return module.exports;
   }
-  load('main').start("0.5.0");
+  load('main').start("0.6.0");
 })();

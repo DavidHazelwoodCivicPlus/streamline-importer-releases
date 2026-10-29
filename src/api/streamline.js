@@ -165,6 +165,28 @@ function streamlineApi(client, opts) {
     await gql('mutation($i: ' + (kind === 'image' ? 'DeleteImageMutationInput!' : 'DeleteFileMutationInput!') + ') { ' + m + '(input: $i) { clientMutationId } }', { i: { id } });
   }
 
+  // ---------- Whole-site listings (for "Erase this site") ----------
+  // pocs, files and images are Relay connections; each is read to the end, 100 at a time.
+  async function readAll(field, query, vars) {
+    const out = [];
+    let after = null;
+    for (let guard = 0; ; guard++) {
+      if (guard >= 500) throw new Error('Stopped listing ' + field + ' after 500 batches');
+      const d = await gql(query, Object.assign({ after }, vars || {}));
+      const c = d[field];
+      out.push(...(c.nodes || []).filter(Boolean));
+      if (!c.pageInfo.hasNextPage) return out;
+      after = c.pageInfo.endCursor;
+    }
+  }
+  const listAllPocs = () => readAll('pocs', 'query($after: String) { pocs(first: 100, after: $after, hideEvents: false) { nodes { id title pocTypeName canDelete unpublished } pageInfo { hasNextPage endCursor } } }');
+  const listFiles = () => readAll('files', 'query($after: String) { files(first: 100, after: $after) { nodes { id basename } pageInfo { hasNextPage endCursor } } }');
+  const listImages = () => readAll('images', 'query($after: String) { images(first: 100, after: $after) { nodes { id basename type } pageInfo { hasNextPage endCursor } } }');
+  async function listMenus() {
+    const ms = await request('GET', '/api/menus');
+    return Array.isArray(ms) ? ms : (ms && ms.menus) || [];
+  }
+
   // ---------- Menus ----------
   async function menuIdFor(name) {
     const ms = await request('GET', '/api/menus');
@@ -207,6 +229,7 @@ function streamlineApi(client, opts) {
   return {
     createPage, draftColumns, addSection, setFreeform, promoteDraft, deletePage, listPages, listLayouts,
     uploadMedia, deleteMedia, setFreeformPreferences, setTeaserPreferences, addTeasers, pageUrl,
+    listAllPocs, listFiles, listImages, listMenus,
     menuIdFor, menuItems, createMenuItem, softDeleteMenuItem
   };
 }

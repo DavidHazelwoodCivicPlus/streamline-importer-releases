@@ -372,6 +372,62 @@ async function undoRun(ctx) {
   log('Undo finished');
 }
 
+// Kinds of content "Erase this site" deletes. The homepage stays (the site needs it), and so do products
+// (payments) and profiles, which are not page content.
+const WIPE_POC_TYPES = ['page', 'event', 'meeting', 'group', 'external'];
+
+// Clears a site for a fresh test import: every menu item in every menu, every page (not the homepage), and,
+// when opts.media is set, every uploaded file and image. snapshot(obj) receives the full list of what is about
+// to go before anything is deleted. Safe to run again after a stop: it only ever deletes what is still there.
+async function wipeSite(api, opts, ctx) {
+  const { log } = ctx;
+  const check = () => { if (ctx.shouldStop && ctx.shouldStop()) throw new StopRequested(); };
+  log('Reading the site…');
+  const menus = await api.listMenus();
+  const items = {};
+  for (const mnu of menus) items[mnu.name] = await api.menuItems(mnu.id);
+  const pocs = (await api.listAllPocs()).filter(p => WIPE_POC_TYPES.includes(p.pocTypeName) && p.canDelete !== false);
+  const files = opts.media ? await api.listFiles() : [];
+  const images = opts.media ? (await api.listImages()).filter(i => i.type !== 'Video') : [];
+  ctx.snapshot({ host: ctx.host, takenAt: new Date().toISOString(), menus, menuItems: items, pages: pocs, files, images });
+  const itemCount = Object.values(items).reduce((s, a) => s + a.length, 0);
+  log('Deleting ' + itemCount + ' menu item(s) in ' + menus.length + ' menu(s), ' + pocs.length + ' page(s)' + (opts.media ? ', ' + files.length + ' file(s) and ' + images.length + ' image(s)' : '') + '.');
+
+  // Menus first, children before parents, re-reading until none are left (as removeAllMenuItems does).
+  for (const mnu of menus) {
+    for (let pass = 0; pass < 4; pass++) {
+      const live = await api.menuItems(mnu.id);
+      if (!live.length) break;
+      const byId = new Map(live.map(i => [String(i.id), i]));
+      const depth = i => { let d = 0, p = i.parent_id; while (p != null && byId.has(String(p)) && d < 20) { d++; p = byId.get(String(p)).parent_id; } return d; };
+      for (const it of live.sort((a, b) => depth(b) - depth(a))) { check(); await api.softDeleteMenuItem(it); }
+    }
+    const left = await api.menuItems(mnu.id);
+    if (left.length) throw new Error(left.length + ' item(s) still in the ' + mnu.name + ' menu: ' + left.slice(0, 5).map(i => i.title).join(', '));
+  }
+  log('  menus cleared');
+
+  let n = 0;
+  for (const p of pocs) {
+    check();
+    await api.deletePage(p.id);
+    if (++n % 25 === 0) log('  … ' + n + ' / ' + pocs.length + ' pages');
+  }
+  log('  ' + n + ' page(s) deleted');
+
+  if (opts.media) {
+    let f = 0, im = 0;
+    for (const x of files) { check(); await api.deleteMedia('file', x.id).catch(e => { if (!/not found|could not find|couldn.t find/i.test(e.message)) throw e; }); if (++f % 25 === 0) log('  … ' + f + ' / ' + files.length + ' files'); }
+    for (const x of images) { check(); await api.deleteMedia('image', x.id).catch(e => { if (!/not found|could not find|couldn.t find/i.test(e.message)) throw e; }); if (++im % 25 === 0) log('  … ' + im + ' / ' + images.length + ' images'); }
+    log('  ' + f + ' file(s) and ' + im + ' image(s) deleted');
+  }
+
+  // What is left, as a check.
+  const pagesLeft = (await api.listAllPocs()).filter(p => WIPE_POC_TYPES.includes(p.pocTypeName) && p.canDelete !== false).length;
+  if (pagesLeft) throw new Error(pagesLeft + ' page(s) are still on the site; run Erase again');
+  return { menuItems: itemCount, pages: n, files: files.length, images: images.length };
+}
+
 // Removes every live item in a menu, after handing a snapshot to the caller (user6 behaviour).
 async function removeAllMenuItems(api, menuName, snapshot, log) {
   const menuId = await api.menuIdFor(menuName);
@@ -387,4 +443,4 @@ async function removeAllMenuItems(api, menuName, snapshot, log) {
   if (left.length) throw new Error(left.length + ' item(s) still live in ' + menuName + ': ' + left.slice(0, 5).map(i => i.title).join(', '));
 }
 
-module.exports = { runPlan, undoRun, removeAllMenuItems, StopRequested };
+module.exports = { runPlan, undoRun, removeAllMenuItems, wipeSite, WIPE_POC_TYPES, StopRequested };

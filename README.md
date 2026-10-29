@@ -30,6 +30,8 @@ The releases repo is public. It gets every tracked file except the Streamline AP
 5. **Preview:** a dry run with no writes. Menu tree, counts, a content preview of any page, and reports: dry run, match (site map), skipped, links, media, FAQs, not imported, warnings.
 6. **Run:** pages → menu items → media → content → promote drafts. Every create is saved to a manifest in this browser right away.
 
+**Erase this site** ("Resume, undo, other actions", for test sites): deletes every menu item in every menu and every page (events, meetings and groups too) whoever made them, and optionally every uploaded file and image. The homepage, products, forms, users and settings stay. Type `WIPE <site address>` to unlock it; a list of everything deleted downloads first. Deleted pages cannot be brought back.
+
 **Resume:** load the same files and run again with the same options; only what is missing is created. **Undo:** "Resume, undo, other actions" → Undo this run removes exactly what the manifest lists (menu items, pages, uploaded media). The manifest can be downloaded and loaded in another browser.
 
 ## Menu from D10 data

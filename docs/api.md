@@ -72,7 +72,7 @@ The `html` sent with the json is rendered from the same tree, so the two always 
 |---|---|---|
 | `amplifyUpsertSectionInstance` with `name: 'Teasers'` in the `gutter` or `main` column | a card section | Proven (0.2.0) |
 | `amplifyUpdatePreferencesTeaser(input: {sectionInstanceId, preferences: {layout: cards, columnDesign: three_column, colorIndex: light3, titleAlignment: centered, title, perPage, orderByIndex, paginationStyleIndex}})` | card style | Settings read from a card section built by hand on the sandbox (2026-10-29). `pageId` + `buttonText` (the button link) are left out: the button does not show on the public page |
-| `amplifyAddTeasersToSectionInstance(input: {sectionInstanceId, isFirst: false, pocIds})` | the cards, in order | Proven with one page (0.2.0); order of several to confirm on the sandbox |
+| `amplifyAddTeasersToSectionInstance(input: {sectionInstanceId, isFirst: false, pocIds})` | the cards, in order | Sandbox (2026-10-29): cards keep the order given. Only shown when the section's `orderByIndex` is `manual`; with `alphabetical_by_title` or `date_published` the added cards are not shown, so the importer always uses manual and sorts the entries itself |
 
 ## Layout limits (sandbox, 2026-10-28)
 

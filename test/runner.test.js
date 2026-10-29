@@ -252,3 +252,48 @@ test('undo removes only what the manifest created', async () => {
   assert.deepEqual([...api.items.keys()], [other.id]);
   assert.ok(man.isEmpty(m));
 });
+
+// ---------- Erase this site ----------
+function wipeFake() {
+  const menus = [{ id: 1, name: 'primary' }, { id: 2, name: 'footer' }];
+  const items = new Map([[10, { id: 10, menu_id: 1, parent_id: null }], [11, { id: 11, menu_id: 1, parent_id: 10 }], [12, { id: 12, menu_id: 1, parent_id: 11 }], [20, { id: 20, menu_id: 2, parent_id: null }]]);
+  const pocs = new Map([['h', { id: 'h', pocTypeName: 'homepage', canDelete: false }], ['p1', { id: 'p1', pocTypeName: 'page', canDelete: true }], ['p2', { id: 'p2', pocTypeName: 'page', canDelete: true }],
+    ['e1', { id: 'e1', pocTypeName: 'event', canDelete: true }], ['pr', { id: 'pr', pocTypeName: 'product', canDelete: true }]]);
+  const files = new Map([['f1', { id: 'f1' }]]), images = new Map([['i1', { id: 'i1', type: 'Image' }], ['v1', { id: 'v1', type: 'Video' }]]);
+  const order = [];
+  return {
+    items, pocs, files, images, order,
+    async listMenus() { return menus; },
+    async menuItems(id) { return [...items.values()].filter(i => i.menu_id === id); },
+    async softDeleteMenuItem(it) { if ([...items.values()].some(c => c.parent_id === it.id)) throw new Error('deleted a parent before its child'); order.push('item'); items.delete(it.id); },
+    async listAllPocs() { return [...pocs.values()]; },
+    async deletePage(id) { order.push('page'); pocs.delete(id); return 'deleted'; },
+    async listFiles() { return [...files.values()]; },
+    async listImages() { return [...images.values()]; },
+    async deleteMedia(kind, id) { order.push(kind); (kind === 'image' ? images : files).delete(id); }
+  };
+}
+
+test('erase: every menu item (children first), every page but the homepage and products, snapshot first', async () => {
+  const { wipeSite } = require('../src/runner');
+  const api = wipeFake();
+  let snap = null;
+  const s = await wipeSite(api, { media: false }, { log: () => {}, host: 'h', snapshot: x => { snap = x; api.order.push('snapshot'); } });
+  assert.equal(api.order[0], 'snapshot');
+  assert.equal(snap.pages.length, 3);
+  assert.equal(api.items.size, 0);
+  assert.deepEqual([...api.pocs.keys()].sort(), ['h', 'pr']);
+  assert.equal(api.files.size, 1, 'media kept unless asked');
+  assert.deepEqual(s, { menuItems: 4, pages: 3, files: 0, images: 0 });
+});
+
+test('erase with media deletes files and images, not videos; a stopped erase can be run again', async () => {
+  const { wipeSite, StopRequested } = require('../src/runner');
+  const api = wipeFake();
+  let n = 0;
+  await assert.rejects(wipeSite(api, { media: true }, { log: () => {}, snapshot: () => {}, shouldStop: () => ++n > 3 }), StopRequested);
+  await wipeSite(api, { media: true }, { log: () => {}, snapshot: () => {} });
+  assert.equal(api.items.size, 0);
+  assert.equal(api.files.size, 0);
+  assert.deepEqual([...api.images.keys()], ['v1']);
+});

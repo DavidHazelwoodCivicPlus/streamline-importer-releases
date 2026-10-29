@@ -102,7 +102,9 @@ function buildPlan(tree, options, idx, exp) {
     pages.push({
       key: listKey, title: def.label, sourceType: 'listing', nid: '', alias: '', sourcePublished: true, unpublished: false,
       content: 'empty', hasBody: false, notes: [], bodyHtml: '', attachments: [], faqs: [], embedded: [], row: null, moduleType: type,
-      cards: entries.length ? [{ column: 'main', title: '', keys: entries.map(e => e.key), orderBy: def.order, perPage: 12 }] : []
+      // Always manual: with any other order the CMS does not show the cards added to the section (sandbox,
+      // 2026-10-29). The entries are already in the module's order (A-Z, news newest first).
+      cards: entries.length ? [{ column: 'main', title: '', keys: entries.map(e => e.key), orderBy: 'manual', perPage: 12 }] : []
     });
     if (opts.moduleMenu) menu.push({ key: 'menu:' + listKey, pageKey: listKey, parentKey: null, weight: topWeight++, title: def.label, level: 1, path: '', row: null });
     for (const e of entries) {
