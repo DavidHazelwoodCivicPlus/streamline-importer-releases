@@ -64,6 +64,25 @@ function streamlineApi(client, opts) {
     );
   }
 
+  // Link cards (a Teasers section), set like the card section built by hand on the sandbox (cards, three_column,
+  // light3, centered; read 2026-10-29) but without its pageId/buttonText: the
+  // button they add (the rounded link) does not show on the public page. Shapes from 0.2.0 and the schema.
+  async function setTeaserPreferences(sectionInstanceId, prefs) {
+    const preferences = Object.assign({ colorIndex: 'light3', layout: 'cards', columnDesign: 'three_column', titleAlignment: 'centered', paginationStyleIndex: 'pagination', perPage: 3, orderByIndex: 'manual' }, prefs);
+    if (!preferences.title) delete preferences.title;
+    await gql(
+      'mutation($i: AmplifyPreferencesTeaserMutationInput!) { amplifyUpdatePreferencesTeaser(input: $i) { clientMutationId } }',
+      { i: { sectionInstanceId, preferences } }
+    );
+  }
+  async function addTeasers(sectionInstanceId, pocIds) {
+    if (!pocIds.length) return;
+    await gql(
+      'mutation($i: AmplifyAddTeasersToSectionInstanceMutationInput!) { amplifyAddTeasersToSectionInstance(input: $i) { clientMutationId } }',
+      { i: { sectionInstanceId, isFirst: false, pocIds } }
+    );
+  }
+
   // The page's public address on this site, e.g. "/boil-water-order-faqs", as the CMS reports it.
   async function pageUrl(pageId) {
     const rec = await request('GET', '/api/pocs/' + encodeURIComponent(pageId));
@@ -187,7 +206,7 @@ function streamlineApi(client, opts) {
 
   return {
     createPage, draftColumns, addSection, setFreeform, promoteDraft, deletePage, listPages, listLayouts,
-    uploadMedia, deleteMedia, setFreeformPreferences, pageUrl,
+    uploadMedia, deleteMedia, setFreeformPreferences, setTeaserPreferences, addTeasers, pageUrl,
     menuIdFor, menuItems, createMenuItem, softDeleteMenuItem
   };
 }

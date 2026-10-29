@@ -5,7 +5,8 @@
 const d10 = require('../lib/d10');
 const { buildNavFromD10, limitTree } = require('../lib/navFromD10');
 const { buildPlan, planReportRows, outline, DEFAULT_OPTIONS } = require('../lib/plan');
-const { toCsv, PLAN_COLUMNS, SKIPPED_COLUMNS, LINK_COLUMNS, MEDIA_COLUMNS } = require('../lib/csv');
+const { toCsv, PLAN_COLUMNS, SKIPPED_COLUMNS, LINK_COLUMNS, MEDIA_COLUMNS, CARD_ISSUE_COLUMNS } = require('../lib/csv');
+const { MODULES, MODULE_TYPES, moduleCounts } = require('../lib/modules');
 const { buildLinkIndex } = require('../lib/links');
 const { buildPageContent, placeholderLookups } = require('../lib/content');
 const { readSiteMap } = require('../lib/sitemap');
@@ -122,7 +123,7 @@ function rebuildPlan() {
     state.nav = buildNavFromD10(state.exp, state.options);
     tree = state.nav.tree;
   }
-  state.plan = buildPlan(limitTree(tree, state.options.limit), state.options, state.idx);
+  state.plan = buildPlan(limitTree(tree, state.options.limit), state.options, state.idx, state.exp);
   state.preview = dryRunContent(state.plan);
 }
 
@@ -329,6 +330,28 @@ function openPanel() {
         body.appendChild(note('Used for links between imported pages. Leave blank: the tool reads each page\'s address from the CMS. Only set it (e.g. /{slug}) if that fails.'));
       }
 
+      body.appendChild(heading('Right column'));
+      body.appendChild(checkbox('Turn D10 "embedded pages" sections into link cards in the right column', o.embeddedPageCards, v => { o.embeddedPageCards = v; }));
+      body.appendChild(note('Square cards (Teasers, card layout), titled with the section heading. Cards only link to pages this run imports.'));
+
+      body.appendChild(heading('Module content'));
+      body.appendChild(hint('Each entry becomes a page (details, body and attachments), listed as cards on a listing page per module. Meetings, events and people are not imported yet.'));
+      const counts = moduleCounts(state.exp);
+      for (const t of MODULE_TYPES) {
+        const n = counts[t] || 0;
+        body.appendChild(checkbox(MODULES[t].label + ' (' + n + ')', o.modules.includes(t), v => { o.modules = v ? o.modules.concat(t) : o.modules.filter(x => x !== t); }, !n));
+      }
+      body.appendChild(checkbox('Add each module listing page to the primary menu', o.moduleMenu, v => { o.moduleMenu = v; }));
+      const tzRow = h('label', '', 'display:block;margin:8px 0;');
+      tzRow.appendChild(document.createTextNode('Site time zone: '));
+      const tz = document.createElement('input'); tz.type = 'text'; tz.style.cssText = 'width:220px;';
+      if (!o.timeZone) { try { o.timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'; } catch (e) { o.timeZone = 'UTC'; } }
+      tz.value = o.timeZone;
+      tz.oninput = () => { o.timeZone = tz.value.trim(); };
+      tzRow.appendChild(tz);
+      body.appendChild(tzRow);
+      body.appendChild(note('D10 stores job closing and bid due times in UTC; they are shown in this zone, e.g. America/Chicago, America/Los_Angeles.'));
+
       body.appendChild(heading('Pages that are unpublished in D10'));
       body.appendChild(radio('si-unpub', [
         { value: 'unpublished', label: 'Import them as unpublished' },
@@ -372,6 +395,11 @@ function openPanel() {
         ? 'Content: ' + [...pv.byKey.values()].filter(c => !c.empty).length + ' pages get their D10 body' + (o.includeAttachments ? ' and attachments' : '') + '; ' + (p.pages.length - [...pv.byKey.values()].filter(c => !c.empty || c.faqs.length).length) + ' stay empty (no body in D10).'
         : 'All pages are empty (title only).'
     ];
+    const lists = p.pages.filter(x => x.sourceType === 'listing');
+    if (lists.length) lines.push('Modules: ' + lists.map(l => l.title + ' (' + (l.cards[0] ? l.cards[0].keys.length : 0) + ')').join(', ') + '. Each entry is a page, listed as cards on its listing page' + (o.moduleMenu ? ', which gets a menu item' : '') + '.');
+    const cardPages = p.pages.filter(x => x.cards.some(c => c.column === 'gutter'));
+    if (cardPages.length) lines.push('Right-column cards: ' + cardPages.reduce((s, x) => s + x.cards.filter(c => c.column === 'gutter').reduce((t, c) => t + c.keys.length, 0), 0) + ' on ' + cardPages.length + ' page(s).');
+    if (p.cardIssues.length) lines.push('Embedded-page links that cannot become cards: ' + p.cardIssues.length + ' (see the card report).');
     const faqPages = p.pages.filter(x => x.faqs && x.faqs.length);
     if (faqPages.length) lines.push('FAQ accordions: ' + faqPages.reduce((s, x) => s + x.faqs.length, 0) + ' on ' + faqPages.length + ' page(s): ' + faqPages.slice(0, 5).map(x => x.title + ' (' + x.faqs.length + ')').join(', ') + (faqPages.length > 5 ? ', …' : '') + '.');
     const missingAtt = pv.warnings.filter(w => /attachment-missing/.test(w)).length;
@@ -438,6 +466,7 @@ function openPanel() {
       panel.appendChild(btn('Media report (CSV)', () => saveCsv(MEDIA_COLUMNS, p.media.map(mid => Object.assign({}, state.idx.media.get(mid), { usedBy: [...(usedBy.get(mid) || [])].join(' | ') })), 'media-' + base + '.csv')));
     }
     panel.appendChild(btn('FAQ report (CSV)', () => saveCsv(FAQ_COLUMNS, faqReport(state.exp), 'faqs-' + base + '.csv')));
+    if (p.cardIssues.length) panel.appendChild(btn('Card report (CSV)', () => saveCsv(CARD_ISSUE_COLUMNS, p.cardIssues, 'cards-not-made-' + base + '.csv')));
     panel.appendChild(btn('Not imported (CSV)', () => saveCsv(OUT_OF_SCOPE_COLUMNS, outOfScopeReport(state.exp), 'not-imported-' + base + '.csv')));
     panel.appendChild(btn('Warnings (TXT)', () => saveFile(navWarn.concat(state.exp.warnings, pv.warnings).join('\r\n'), 'warnings-' + base + '.txt', 'text/plain;charset=utf-8')));
 
@@ -458,7 +487,9 @@ function openPanel() {
       'Create ' + p.menu.length + ' primary menu items linked to those pages'
     ];
     if (p.media.length) steps.push('Download ' + p.media.length + ' files and images from the old site and upload them');
-    if (o.pageContent === 'content') steps.push('Write each page\'s converted content, with links pointing at the new pages and media');
+    if (o.pageContent === 'content' || o.modules.length) steps.push('Write each page\'s converted content, with links pointing at the new pages and media');
+    const cardSecs = p.pages.reduce((n, x) => n + x.cards.length, 0);
+    if (cardSecs) steps.push('Add ' + cardSecs + ' sections of link cards (module listing pages and right-column cards)');
     steps.push('Promote each page\'s draft');
     const ul = h('ul');
     steps.forEach(t => ul.appendChild(h('li', t)));

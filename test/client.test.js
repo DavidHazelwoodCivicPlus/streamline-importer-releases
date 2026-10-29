@@ -41,3 +41,14 @@ test('gives up after maxRetries on repeated 5xx', async () => {
   await assert.rejects(c.request('GET', '/x'), /returned 503/);
   assert.equal(c.requestCount(), 3);
 });
+
+test('every source file and the built userscript parse', () => {
+  const fs = require('fs'), path = require('path'), { execFileSync } = require('child_process');
+  const root = path.join(__dirname, '..');
+  const files = [];
+  const walk = d => { for (const e of fs.readdirSync(d, { withFileTypes: true })) { const p = path.join(d, e.name); if (e.isDirectory()) walk(p); else if (p.endsWith('.js')) files.push(p); } };
+  walk(path.join(root, 'src'));
+  const built = path.join(root, 'dist', 'streamline-importer.user.js');
+  if (fs.existsSync(built)) files.push(built);
+  for (const f of files) execFileSync(process.execPath, ['--check', f]); // throws with the syntax error
+});

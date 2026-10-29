@@ -25,7 +25,7 @@ function buildNavFromD10(exp, opts) {
 
   const bySite = new Map();
   for (const p of exp.pages) {
-    if (p.kind !== 'page') { skip(p, p.kind === 'news' ? 'News item (modules are out of scope)' : 'Event (modules are out of scope)'); continue; }
+    if (p.kind !== 'page') { skip(p, p.kind === 'news' ? 'News item (not a menu page; select the News module to import it)' : 'Event (not imported yet)'); continue; }
     if (p.micrositeIds.length !== 1) { skip(p, p.micrositeIds.length ? 'Belongs to more than one microsite' : 'No microsite'); continue; }
     const id = p.micrositeIds[0];
     if (!bySite.has(id)) bySite.set(id, []);

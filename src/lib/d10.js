@@ -150,6 +150,17 @@ function faqSectionsOf(rec, paragraphById) {
   })).filter(s => s.categoryId);
 }
 
+// The "embedded pages" sections a page shows: a heading and the nodes it links to, in order.
+// They become link cards in the page's right column.
+function embeddedPagesOf(rec, paragraphById) {
+  return sectionsOf(rec, paragraphById).filter(s => s.bundle === 'embedded_pages' && s.rec).map(s => ({
+    pid: s.pid,
+    header: cleanTitle(firstValue(s.rec, 'field_embed_header') || ''),
+    nids: fieldItems(s.rec, 'field_embed_individual').map(it => it && (it.target_id != null ? it.target_id : it.entity_id)).filter(v => v != null).map(String),
+    embedType: String(firstValue(s.rec, 'field_embed_type') || '')
+  }));
+}
+
 function summarizeFaq(rec) {
   const body = firstValue(rec, 'body');
   return {
@@ -222,7 +233,10 @@ function loadExport(files) {
   // FAQ sections on pages and microsites, and the FAQs themselves.
   const paragraphById = new Map((raw.paragraphs || []).filter(p => p && p.entity_id != null).map(p => [String(p.entity_id), p]));
   const rawByNid = new Map([...(raw.pages || []), ...(raw.microsites || [])].filter(r => r && r.fields).map(r => [String(r.entity_id), r]));
-  for (const s of pages.concat(microsites)) s.faqSections = faqSectionsOf(rawByNid.get(s.nid), paragraphById);
+  for (const s of pages.concat(microsites)) {
+    s.faqSections = faqSectionsOf(rawByNid.get(s.nid), paragraphById);
+    s.embeddedPages = embeddedPagesOf(rawByNid.get(s.nid), paragraphById);
+  }
   const faqs = (raw.faqs || []).filter(r => r && r.fields).map(summarizeFaq);
   const faqCategories = faqsByCategory(faqs);
 
@@ -231,6 +245,6 @@ function loadExport(files) {
 
 module.exports = {
   KNOWN_FILES, REQUIRED_FILES, fieldItems, firstValue, hasValue, cleanTitle, classifyPage,
-  summarizePage, summarizeMicrosite, summarizeMedia, summarizeFaq, faqsByCategory, sectionsOf, faqSectionsOf,
+  summarizePage, summarizeMicrosite, summarizeMedia, summarizeFaq, faqsByCategory, sectionsOf, faqSectionsOf, embeddedPagesOf,
   oldSiteHosts, exportKey, loadExport
 };

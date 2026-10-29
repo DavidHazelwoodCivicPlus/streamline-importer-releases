@@ -4,13 +4,14 @@
 //   menu    - create menu items top-down, linked to their pages (poc_id), in plan order
 //   media   - upload the files and images the pages link to (content mode, optional)
 //   content - write each page's converted body, with /node and /media links pointing at the new site
+//   cards   - Teasers sections of link cards: module listing pages, and right-column cards from D10 embedded pages
 //   promote - promote each page's draft
 // Every create is written to the manifest and saved before the next request, so a run that stops
 // at any point can be resumed or undone. Running the same plan again only does what is missing.
 
 const man = require('./lib/manifest');
 const { INTERIOR_STANDARD_LAYOUT_ID } = require('./api/streamline');
-const { RUN_LOCKED } = require('./lib/plan');
+const { RUN_LOCKED, sameOption } = require('./lib/plan');
 const { buildPageContent, linkedPageKeys } = require('./lib/content');
 
 class StopRequested extends Error { constructor() { super('Stopped by user'); this.name = 'StopRequested'; } }
@@ -21,13 +22,14 @@ async function runPlan(plan, ctx) {
   const save = () => ctx.save(m);
   const check = () => { if (ctx.shouldStop && ctx.shouldStop()) throw new StopRequested(); };
   if (m.startedAt && m.options) {
-    const changed = RUN_LOCKED.filter(k => m.options[k] !== undefined && m.options[k] !== plan.options[k]);
+    const changed = RUN_LOCKED.filter(k => m.options[k] !== undefined && !sameOption(m.options[k], plan.options[k]));
     if (changed.length) throw new Error('This run was started with different options (' + changed.join(', ') + '). Use the same options to resume, or undo the run first.');
   }
   m.options = plan.options;
   const media = plan.media || [];
   const hasContent = plan.pages.some(p => p.content === 'content');
-  const phases = ['pages', 'menu items'].concat(media.length ? ['media'] : [], hasContent ? ['content'] : [], ['promote drafts']);
+  const hasCards = plan.pages.some(p => p.cards && p.cards.length);
+  const phases = ['pages', 'menu items'].concat(media.length ? ['media'] : [], hasContent ? ['content'] : [], hasCards ? ['link cards'] : [], ['promote drafts']);
   const phase = name => log('Phase ' + (phases.indexOf(name) + 1) + ' of ' + phases.length + ': ' + name);
 
   await resolveLayout(api, m, log);
@@ -114,6 +116,12 @@ async function runPlan(plan, ctx) {
   if (hasContent) {
     phase('content');
     await contentPhase(plan, ctx, check, save);
+  }
+
+  // ---- link cards ----
+  if (hasCards) {
+    phase('link cards');
+    await cardsPhase(plan, ctx, check, save);
   }
 
   // ---- promote ----
@@ -222,6 +230,53 @@ async function contentPhase(plan, ctx, check, save) {
     if (written % 25 === 0) log('  … ' + written + ' pages written');
   }
   log('  ' + written + ' written' + (accordions ? ' (' + accordions + ' FAQ accordions)' : '') + ', ' + empty + ' had no body');
+}
+
+// Teasers sections of link cards. Each section's id, and whether its cards were added, are saved as soon as they
+// happen, so a resume finishes a half-done section instead of adding another.
+async function cardsPhase(plan, ctx, check, save) {
+  const { api, manifest: m, log } = ctx;
+  let sections = 0, cards = 0;
+  for (const p of plan.pages) {
+    if (!p.cards || !p.cards.length) continue;
+    const rec = m.pages[p.key];
+    if (!rec || rec.cardsComplete) continue;
+    check();
+    let cols = null;
+    const colId = async type => {
+      cols = cols || await api.draftColumns(rec.streamlineId);
+      const c = cols.find(x => x.columnType === type);
+      if (!c) throw new Error('Page "' + p.title + '" has no ' + type + ' column (columns: ' + cols.map(x => x.columnType).join(', ') + ')');
+      return c.id;
+    };
+    // Main-column cards go after the body and FAQ sections; right-column cards are the only sections there.
+    const mainBase = 1 + (m.pages[p.key].sectionId ? 1 : 0) + ((m.pages[p.key].faqSectionIds || []).length);
+    const ids = (m.pages[p.key].cardSectionIds || []).slice(), done = (m.pages[p.key].cardsDone || []).slice();
+    let gutterIndex = 0, mainIndex = 0;
+    for (let i = 0; i < p.cards.length; i++) {
+      check();
+      const card = p.cards[i];
+      const weight = card.column === 'gutter' ? gutterIndex++ : mainBase + mainIndex++;
+      if (!ids[i]) {
+        ids[i] = await api.addSection(rec.streamlineId, 'Teasers', await colId(card.column), weight);
+        man.recordPage(m, p.key, { cardSectionIds: ids.slice() });
+        save();
+        sections++;
+      }
+      await api.setTeaserPreferences(ids[i], { title: card.title || undefined, orderByIndex: card.orderBy, perPage: card.perPage });
+      if (!done[i]) {
+        const pocIds = card.keys.map(k => m.pages[k] && m.pages[k].streamlineId).filter(Boolean);
+        await api.addTeasers(ids[i], pocIds);
+        done[i] = true;
+        man.recordPage(m, p.key, { cardsDone: done.slice() });
+        save();
+        cards += pocIds.length;
+      }
+    }
+    man.recordPage(m, p.key, { cardsComplete: true });
+    save();
+  }
+  log('  ' + sections + ' card sections, ' + cards + ' cards');
 }
 
 // Links between imported pages need each page's address on the new site. The CMS reports it on the page's

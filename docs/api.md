@@ -66,6 +66,14 @@ Status of every call the importer makes. "Proven" means a working script already
 
 The `html` sent with the json is rendered from the same tree, so the two always agree.
 
+## Link cards (Teasers)
+
+| Call | Used for | Status |
+|---|---|---|
+| `amplifyUpsertSectionInstance` with `name: 'Teasers'` in the `gutter` or `main` column | a card section | Proven (0.2.0) |
+| `amplifyUpdatePreferencesTeaser(input: {sectionInstanceId, preferences: {layout: cards, columnDesign: three_column, colorIndex: light3, titleAlignment: centered, title, perPage, orderByIndex, paginationStyleIndex}})` | card style | Settings read from a card section built by hand on the sandbox (2026-10-29). `pageId` + `buttonText` (the button link) are left out: the button does not show on the public page |
+| `amplifyAddTeasersToSectionInstance(input: {sectionInstanceId, isFirst: false, pocIds})` | the cards, in order | Proven with one page (0.2.0); order of several to confirm on the sandbox |
+
 ## Layout limits (sandbox, 2026-10-28)
 
 On all four layouts (InteriorStandard, InteriorRoomToBreath, InteriorNoNavigation, InteriorLandingPage) the right column (`gutter`) accepts only `Teasers`. Freeform, HtmlEmbed and the rest are main-column only (`amplifyDraft` → `columns { columnType supportedSections }`). So right-column content from D10 cannot be recreated; FAQs go in the main column.

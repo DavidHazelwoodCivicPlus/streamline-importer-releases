@@ -50,6 +50,12 @@ The releases repo is public. It gets every tracked file except the Streamline AP
 - Links to other imported pages use each page's address as the CMS reports it (`GET /api/pocs/{id}` → `url`). A "Page URL pattern" in Options overrides that.
 - Links to imported pages and uploaded files point at the new site. Links to anything not imported keep pointing at the old site and are listed in the links report with the reason.
 
+## Module content and link cards
+
+- **Modules (Options → Module content):** news, business directory, jobs, bids & RFPs, ordinances & resolutions, parks, projects and locations. Each record becomes a page: its details (status, dates, address, amenities…), its body and a Documents list. Each module gets a listing page that shows its entries as cards (news newest first, the rest A–Z), with an optional primary menu item. Date-times are stored in UTC by D10 and shown in the **Site time zone** set in Options. Meetings, events and people (staff directory) are not imported yet.
+- **Right-column cards:** D10 "embedded pages" sections become a Teasers section in the page's right column, titled with the section heading, with one card per linked page in D10 order. Cards use the square card style (cards, three_column, light3, centered) and never the button link, which does not show on the public page. Links that cannot become cards (page not imported, module not selected, not in the export) are listed in the card report.
+- Streamline's right column accepts only Teasers (link cards) on every layout, so other right-column content (FAQs, text) goes in the main column.
+
 ## Develop
 
 - `npm test` runs the unit tests, including every body in the sample exports when they are on this machine (`SI_SAMPLE_DIRS`, separated by `;`).

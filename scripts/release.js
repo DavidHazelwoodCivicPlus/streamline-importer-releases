@@ -40,9 +40,10 @@ if (bump !== 'none') {
 }
 console.log('Releasing v' + pkg.version);
 
-// 2. Test and build. Stops on any failure.
-execFileSync(process.execPath, ['--test', ...fs.readdirSync(path.join(ROOT, 'test')).filter(f => f.endsWith('.test.js')).map(f => path.join('test', f))], { cwd: ROOT, stdio: 'inherit' });
+// 2. Build and test. Stops on any failure.
+// Build first, so the tests (which parse dist/) check the file that is about to ship.
 execFileSync(process.execPath, ['build.js'], { cwd: ROOT, stdio: 'inherit' });
+execFileSync(process.execPath, ['--test', ...fs.readdirSync(path.join(ROOT, 'test')).filter(f => f.endsWith('.test.js')).map(f => path.join('test', f))], { cwd: ROOT, stdio: 'inherit' });
 // Commit the version and the fresh build here too, so this repo and the release always match.
 git(ROOT, 'add', 'package.json', 'dist');
 if (git(ROOT, 'status', '--porcelain', '--untracked-files=no')) git(ROOT, 'commit', '-m', 'Release v' + pkg.version);

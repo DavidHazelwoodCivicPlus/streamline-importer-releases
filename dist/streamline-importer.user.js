@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Drupal 10 to Streamline Importer
 // @namespace    civicplus.streamline.d10importer
-// @version      0.4.0
+// @version      0.5.0
 // @description  Create Streamline pages and the primary menu from a Drupal 10 export (www-*.json). Runs on any Streamline CMS admin page; does nothing elsewhere.
 // @match        https://*/*
 // @require      https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js
@@ -12,7 +12,7 @@
 // @updateURL    https://raw.githubusercontent.com/DavidHazelwoodCivicPlus/streamline-importer-releases/main/dist/streamline-importer.meta.js
 // @downloadURL  https://raw.githubusercontent.com/DavidHazelwoodCivicPlus/streamline-importer-releases/main/dist/streamline-importer.user.js
 // ==/UserScript==
-// Built 2026-10-28T17:54:31.737Z. Do not edit; edit src/ and run "npm run build".
+// Built 2026-10-29T15:36:00.075Z. Do not edit; edit src/ and run "npm run build".
 
 (function () {
   'use strict';
@@ -200,6 +200,25 @@ function streamlineApi(client, opts) {
     );
   }
 
+  // Link cards (a Teasers section), set like the card section built by hand on the sandbox (cards, three_column,
+  // light3, centered; read 2026-10-29) but without its pageId/buttonText: the
+  // button they add (the rounded link) does not show on the public page. Shapes from 0.2.0 and the schema.
+  async function setTeaserPreferences(sectionInstanceId, prefs) {
+    const preferences = Object.assign({ colorIndex: 'light3', layout: 'cards', columnDesign: 'three_column', titleAlignment: 'centered', paginationStyleIndex: 'pagination', perPage: 3, orderByIndex: 'manual' }, prefs);
+    if (!preferences.title) delete preferences.title;
+    await gql(
+      'mutation($i: AmplifyPreferencesTeaserMutationInput!) { amplifyUpdatePreferencesTeaser(input: $i) { clientMutationId } }',
+      { i: { sectionInstanceId, preferences } }
+    );
+  }
+  async function addTeasers(sectionInstanceId, pocIds) {
+    if (!pocIds.length) return;
+    await gql(
+      'mutation($i: AmplifyAddTeasersToSectionInstanceMutationInput!) { amplifyAddTeasersToSectionInstance(input: $i) { clientMutationId } }',
+      { i: { sectionInstanceId, isFirst: false, pocIds } }
+    );
+  }
+
   // The page's public address on this site, e.g. "/boil-water-order-faqs", as the CMS reports it.
   async function pageUrl(pageId) {
     const rec = await request('GET', '/api/pocs/' + encodeURIComponent(pageId));
@@ -323,7 +342,7 @@ function streamlineApi(client, opts) {
 
   return {
     createPage, draftColumns, addSection, setFreeform, promoteDraft, deletePage, listPages, listLayouts,
-    uploadMedia, deleteMedia, setFreeformPreferences, pageUrl,
+    uploadMedia, deleteMedia, setFreeformPreferences, setTeaserPreferences, addTeasers, pageUrl,
     menuIdFor, menuItems, createMenuItem, softDeleteMenuItem
   };
 }
@@ -408,7 +427,7 @@ const PLAN_COLUMNS = [
   { key: 'level', label: 'Level' }, { key: 'menuPath', label: 'Parent path' }, { key: 'title', label: 'Menu item / page' },
   { key: 'order', label: 'Order' }, { key: 'sourceType', label: 'D10 type' }, { key: 'nid', label: 'D10 nid' },
   { key: 'oldUrl', label: 'Old URL' }, { key: 'd10Published', label: 'Published in D10' }, { key: 'importAs', label: 'Import as' },
-  { key: 'row', label: 'Sheet row' }, { key: 'body', label: 'Body' }, { key: 'attachments', label: 'Attachments' }, { key: 'faqs', label: 'FAQ accordions' },
+  { key: 'row', label: 'Sheet row' }, { key: 'body', label: 'Body' }, { key: 'attachments', label: 'Attachments' }, { key: 'faqs', label: 'FAQ accordions' }, { key: 'cards', label: 'Right-column cards' },
   { key: 'linksToPages', label: 'Links to new pages' }, { key: 'linksToMedia', label: 'Links to uploaded media' },
   { key: 'linksToOldSite', label: 'Links left on old site' }, { key: 'dropped', label: 'Dropped markup' },
   { key: 'notes', label: 'Not carried over' }
@@ -434,7 +453,13 @@ const SKIPPED_COLUMNS = [
   { key: 'parent', label: 'Parent' }, { key: 'reason', label: 'Why skipped' }
 ];
 
-module.exports = { toCsv, PLAN_COLUMNS, SKIPPED_COLUMNS, LINK_COLUMNS, MEDIA_COLUMNS };
+// Embedded-pages links that could not become right-column cards.
+const CARD_ISSUE_COLUMNS = [
+  { key: 'page', label: 'Page' }, { key: 'nid', label: 'D10 nid' }, { key: 'section', label: 'Section heading' },
+  { key: 'target', label: 'Linked nid' }, { key: 'targetTitle', label: 'Linked title' }, { key: 'reason', label: 'Why no card' }
+];
+
+module.exports = { CARD_ISSUE_COLUMNS, toCsv, PLAN_COLUMNS, SKIPPED_COLUMNS, LINK_COLUMNS, MEDIA_COLUMNS };
 
   },
   "lib/d10": function (module, exports, require) {
@@ -590,6 +615,17 @@ function faqSectionsOf(rec, paragraphById) {
   })).filter(s => s.categoryId);
 }
 
+// The "embedded pages" sections a page shows: a heading and the nodes it links to, in order.
+// They become link cards in the page's right column.
+function embeddedPagesOf(rec, paragraphById) {
+  return sectionsOf(rec, paragraphById).filter(s => s.bundle === 'embedded_pages' && s.rec).map(s => ({
+    pid: s.pid,
+    header: cleanTitle(firstValue(s.rec, 'field_embed_header') || ''),
+    nids: fieldItems(s.rec, 'field_embed_individual').map(it => it && (it.target_id != null ? it.target_id : it.entity_id)).filter(v => v != null).map(String),
+    embedType: String(firstValue(s.rec, 'field_embed_type') || '')
+  }));
+}
+
 function summarizeFaq(rec) {
   const body = firstValue(rec, 'body');
   return {
@@ -662,7 +698,10 @@ function loadExport(files) {
   // FAQ sections on pages and microsites, and the FAQs themselves.
   const paragraphById = new Map((raw.paragraphs || []).filter(p => p && p.entity_id != null).map(p => [String(p.entity_id), p]));
   const rawByNid = new Map([...(raw.pages || []), ...(raw.microsites || [])].filter(r => r && r.fields).map(r => [String(r.entity_id), r]));
-  for (const s of pages.concat(microsites)) s.faqSections = faqSectionsOf(rawByNid.get(s.nid), paragraphById);
+  for (const s of pages.concat(microsites)) {
+    s.faqSections = faqSectionsOf(rawByNid.get(s.nid), paragraphById);
+    s.embeddedPages = embeddedPagesOf(rawByNid.get(s.nid), paragraphById);
+  }
   const faqs = (raw.faqs || []).filter(r => r && r.fields).map(summarizeFaq);
   const faqCategories = faqsByCategory(faqs);
 
@@ -671,7 +710,7 @@ function loadExport(files) {
 
 module.exports = {
   KNOWN_FILES, REQUIRED_FILES, fieldItems, firstValue, hasValue, cleanTitle, classifyPage,
-  summarizePage, summarizeMicrosite, summarizeMedia, summarizeFaq, faqsByCategory, sectionsOf, faqSectionsOf,
+  summarizePage, summarizeMicrosite, summarizeMedia, summarizeFaq, faqsByCategory, sectionsOf, faqSectionsOf, embeddedPagesOf,
   oldSiteHosts, exportKey, loadExport
 };
 
@@ -1179,6 +1218,18 @@ function buildLinkIndex(exp) {
   const aliases = new Map(); // normalized alias -> nid
   for (const p of exp.pages) { nodes.set(p.nid, { sourceType: 'page', kind: p.kind, title: p.title, alias: p.alias }); if (p.alias) aliases.set(normPath(p.alias), p.nid); }
   for (const m of exp.microsites) { nodes.set(m.nid, { sourceType: 'microsite', kind: 'microsite', title: m.title, alias: m.alias }); if (m.alias) aliases.set(normPath(m.alias), m.nid); }
+  // Module records (jobs, bids, parks…) are nodes too; when they are imported, links to them go to their page.
+  const { MODULES } = require('./modules');
+  for (const [type, def] of Object.entries(MODULES)) {
+    if (type === 'news') continue; // news items are page records, already above
+    for (const r of (exp.raw && exp.raw[def.file]) || []) {
+      if (!r || r.entity_id == null || !r.fields) continue;
+      const nid = String(r.entity_id), t = r.fields.title && r.fields.title[0] && r.fields.title[0].value;
+      const alias = (r.fields.path && r.fields.path[0] && r.fields.path[0].alias) || '';
+      if (!nodes.has(nid)) nodes.set(nid, { sourceType: type, kind: type, title: String(t || ''), alias });
+      if (alias) aliases.set(normPath(alias), nid);
+    }
+  }
   const media = new Map(), byUuid = new Map(), byPath = new Map();
   for (const m of exp.media || []) {
     media.set(m.mid, m);
@@ -1191,7 +1242,8 @@ function buildLinkIndex(exp) {
   };
 }
 
-const keyFor = (idx, nid) => { const n = idx.nodes.get(nid); return n ? n.sourceType + ':' + nid : null; };
+// The plan key of the page a node becomes: page:N, microsite:N, news:N, jobs:N, …
+const keyFor = (idx, nid) => { const n = idx.nodes.get(nid); return !n ? null : (n.kind === 'news' ? 'news:' : n.sourceType + ':') + nid; };
 
 // Classifies an href without resolving it. Returns { type, nid?, mid?, path?, url } where type is
 // 'node' | 'media' | 'file' | 'alias' | 'internal' | 'external' | 'special'.
@@ -1523,6 +1575,142 @@ const MATCH_COLUMNS = [
 module.exports = { normalizeTitle, parseCsv, parseOverrides, matchSiteMap, MATCH_COLUMNS };
 
   },
+  "lib/modules": function (module, exports, require) {
+'use strict';
+// D10 module content (records that are not pages) imported as Streamline pages: one page per entry, built
+// from its fields, plus one listing page per module that shows its entries as cards.
+// Meetings, events and people (directory listings) are left out on purpose: Streamline is adding modules for them.
+// Pure: takes the loaded export, returns entry summaries.
+
+const { fieldItems, firstValue, cleanTitle } = require('./d10');
+
+const esc = s => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+
+// D10 stores date-times in UTC ("2018-07-23T15:00:00"); they are shown in the site's time zone,
+// e.g. "July 23, 2018 10:00 AM" in America/Chicago. Date-only values ("2023-07-01") are shown as written.
+function formatDate(s, timeZone) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2}))?/.exec(String(s || ''));
+  if (!m) return String(s || '');
+  if (!m[4]) return MONTHS[Number(m[2]) - 1] + ' ' + Number(m[3]) + ', ' + m[1];
+  const d = new Date(Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5]));
+  const parts = Object.fromEntries(new Intl.DateTimeFormat('en-US', { timeZone: timeZone || 'UTC', year: 'numeric', month: 'long', day: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true })
+    .formatToParts(d).map(p => [p.type, p.value]));
+  return parts.month + ' ' + parts.day + ', ' + parts.year + ' ' + parts.hour + ':' + parts.minute + ' ' + parts.dayPeriod;
+}
+const isoDate = s => { const m = /^(\d{4}-\d{2}-\d{2})/.exec(String(s || '')); return m ? m[1] : ''; };
+
+// A D10 address field as lines of text.
+function addressLines(rec, name) {
+  const a = fieldItems(rec, name)[0];
+  if (!a || typeof a !== 'object') return [];
+  const city = [a.locality, a.administrative_area].filter(Boolean).join(', ') + (a.postal_code ? ' ' + a.postal_code : '');
+  return [a.organization, a.address_line1, a.address_line2, a.address_line3, city.trim()].map(x => (x || '').trim()).filter(Boolean);
+}
+
+const termNames = (rec, name, terms) => fieldItems(rec, name).map(it => it && (it.target_id != null ? terms[String(it.target_id)] : null)).filter(Boolean);
+const titleCase = s => String(s || '').replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+
+// One "Label: value" line per detail that has a value.
+const detail = (label, value) => (value ? '<p><strong>' + esc(label) + ':</strong> ' + esc(value) + '</p>' : '');
+const richDetail = (label, html) => (html && html.trim() ? '<h3>' + esc(label) + '</h3>' + html : '');
+const addressHtml = lines => (lines.length ? '<p><strong>Address:</strong><br>' + lines.map(esc).join('<br>') + '</p>' : '');
+
+// Each module: where its records are, what its listing page is called, and how an entry's page is built.
+// details(rec, terms, tz) returns HTML placed above the body.
+const MODULES = {
+  news: {
+    label: 'News', file: 'pages', order: 'date_published',
+    filter: p => p.kind === 'news',
+    details: () => ''
+  },
+  business_directory: {
+    label: 'Business Directory', file: 'business_directory', order: 'alphabetical_by_title',
+    details: rec => addressHtml(addressLines(rec, 'field_address'))
+  },
+  jobs: {
+    label: 'Job Openings', file: 'jobs', order: 'alphabetical_by_title',
+    details: (rec, terms, tz) => detail('Status', titleCase(firstValue(rec, 'field_job_status'))) + detail('Closing date', firstValue(rec, 'field_job_closing_date') && formatDate(firstValue(rec, 'field_job_closing_date'), tz))
+  },
+  bids_rfps: {
+    label: 'Bids & RFPs', file: 'bids_rfps', order: 'alphabetical_by_title',
+    details: (rec, terms, tz) => detail('Status', titleCase(firstValue(rec, 'field_bid_status'))) + detail('Due', firstValue(rec, 'field_date') && formatDate(firstValue(rec, 'field_date'), tz))
+  },
+  ordinances: {
+    label: 'Ordinances & Resolutions', file: 'ordinances', order: 'alphabetical_by_title',
+    // field_ordinance_resolution (1/0) is left out: the export does not say which value means which.
+    details: (rec, terms) => detail('Number', firstValue(rec, 'field_ordinance_resolution_id')) + detail('Status', termNames(rec, 'field_ordinance_resolution_statu', terms).join(', '))
+  },
+  parks: {
+    label: 'Parks', file: 'parks', order: 'alphabetical_by_title',
+    details: (rec, terms) => addressHtml(addressLines(rec, 'field_address')) +
+      detail('Amenities', termNames(rec, 'field_amenities', terms).join(', ')) +
+      richDetail('Hours', firstValue(rec, 'field_hours') || '') +
+      richDetail('Rules and regulations', firstValue(rec, 'field_rules_regulations') || '')
+  },
+  projects: {
+    label: 'Projects', file: 'projects', order: 'alphabetical_by_title',
+    details: (rec, terms) => detail('Status', termNames(rec, 'field_project_status', terms).join(', ')) +
+      detail('Type', termNames(rec, 'field_project_type', terms).join(', ')) +
+      detail('Project ID', firstValue(rec, 'field_project_id') !== firstValue(rec, 'title') ? firstValue(rec, 'field_project_id') : '') +
+      detail('Date received', firstValue(rec, 'field_date_received') && formatDate(firstValue(rec, 'field_date_received'))) +
+      addressHtml(addressLines(rec, 'field_address'))
+  },
+  standard_locations: {
+    label: 'Locations', file: 'standard_locations', order: 'alphabetical_by_title',
+    details: rec => addressHtml(addressLines(rec, 'field_address'))
+  }
+};
+const MODULE_TYPES = Object.keys(MODULES);
+
+// Entries of one module type, in the order its listing page shows them.
+// Each: { key, type, nid, title, alias, published, bodyHtml, attachments, publishedAt, notes, micrositeIds }
+// opts.timeZone: the site's IANA time zone for date-times (default UTC).
+function moduleEntries(exp, type, opts) {
+  const tz = (opts && opts.timeZone) || 'UTC';
+  const def = MODULES[type];
+  if (!def) throw new Error('Unknown module type ' + type);
+  let entries;
+  if (type === 'news') {
+    // News items are page records; their summaries are already loaded.
+    const raw = new Map((exp.raw.pages || []).map(r => [String(r.entity_id), r]));
+    entries = exp.pages.filter(def.filter).map(p => ({
+      key: 'news:' + p.nid, type, nid: p.nid, title: p.title, alias: p.alias, published: p.published,
+      bodyHtml: p.bodyHtml, attachments: p.attachments, publishedAt: isoDate(firstValue(raw.get(p.nid), 'field_news_date')),
+      micrositeIds: p.micrositeIds, notes: p.notes.filter(n => !/attachments/i.test(n))
+    }));
+    entries.sort((a, b) => (b.publishedAt || '').localeCompare(a.publishedAt || '') || a.title.localeCompare(b.title));
+    return entries;
+  }
+  entries = (exp.raw[def.file] || []).filter(r => r && r.fields).map(rec => {
+    const body = firstValue(rec, 'body');
+    const notes = [];
+    if (fieldItems(rec, 'field_sections').length) notes.push('Has sections (paragraphs)');
+    if (fieldItems(rec, 'field_primary_image_video').length) notes.push('Has primary image/video');
+    if (fieldItems(rec, 'field_location').length) notes.push('Has a map location');
+    return {
+      key: type + ':' + rec.entity_id, type, nid: String(rec.entity_id),
+      title: cleanTitle(firstValue(rec, 'title')) || '(untitled ' + rec.entity_id + ')',
+      alias: (fieldItems(rec, 'path')[0] || {}).alias || '', published: rec.is_published === true,
+      bodyHtml: def.details(rec, exp.terms, tz) + (typeof body === 'string' ? body : ''),
+      attachments: fieldItems(rec, 'field_file_attachments').map(it => it && (it.target_id != null ? it.target_id : it.entity_id)).filter(v => v != null).map(String),
+      publishedAt: '', micrositeIds: fieldItems(rec, 'og_audience').map(it => it && it.target_id).filter(Boolean).map(String), notes
+    };
+  });
+  entries.sort((a, b) => a.title.localeCompare(b.title, 'en', { sensitivity: 'base', numeric: true }));
+  return entries;
+}
+
+// How many records each module type has, for the options screen.
+function moduleCounts(exp) {
+  const out = {};
+  for (const t of MODULE_TYPES) out[t] = t === 'news' ? exp.pages.filter(p => p.kind === 'news').length : (exp.raw[MODULES[t].file] || []).length;
+  return out;
+}
+
+module.exports = { MODULES, MODULE_TYPES, moduleEntries, moduleCounts, formatDate, addressLines };
+
+  },
   "lib/navFromD10": function (module, exports, require) {
 'use strict';
 // Builds the primary menu tree from the D10 export alone (no site-map workbook):
@@ -1551,7 +1739,7 @@ function buildNavFromD10(exp, opts) {
 
   const bySite = new Map();
   for (const p of exp.pages) {
-    if (p.kind !== 'page') { skip(p, p.kind === 'news' ? 'News item (modules are out of scope)' : 'Event (modules are out of scope)'); continue; }
+    if (p.kind !== 'page') { skip(p, p.kind === 'news' ? 'News item (not a menu page; select the News module to import it)' : 'Event (not imported yet)'); continue; }
     if (p.micrositeIds.length !== 1) { skip(p, p.micrositeIds.length ? 'Belongs to more than one microsite' : 'No microsite'); continue; }
     const id = p.micrositeIds[0];
     if (!bySite.has(id)) bySite.set(id, []);
@@ -1609,27 +1797,35 @@ module.exports = { buildNavFromD10, limitTree, isHomeMicrosite, micrositeKey, pa
   },
   "lib/plan": function (module, exports, require) {
 'use strict';
-// Turns a menu tree into the exact list of things a run will create, and the dry-run report.
-// Pure: the same input always gives the same plan, so resume can match work to the manifest by key.
+// Turns a menu tree (plus the module types chosen) into the exact list of things a run will create,
+// and the dry-run report. Pure: the same input always gives the same plan, so resume can match work
+// to the manifest by key.
 
 const { referencedMedia } = require('./links');
+const { MODULES, moduleEntries } = require('./modules');
 
 const DEFAULT_OPTIONS = Object.freeze({
   menuSource: 'd10',            // 'd10' | 'workbook'
   pageContent: 'empty',         // 'empty' | 'content' (D10 body converted to freeform content)
   unpublishedSourceAs: 'unpublished', // how to import pages that are unpublished in D10: 'unpublished' | 'published'
-  newsEvents: 'skip',           // only option for now
+  newsEvents: 'skip',           // news and events never become menu pages (news can be imported as a module)
   includeEmptyMicrosites: false,
   includeAttachments: true,     // content mode: list a page's file attachments under a "Documents" heading
   faqAccordions: true,          // content mode: a page's D10 FAQ sections become one accordion per question in the main column
-  uploadMedia: true,            // content mode: upload the files and images pages link to, and point links at them
+  uploadMedia: true,            // upload the files and images pages link to, and point links at them
   pageUrlPattern: 'auto',       // page addresses for links between pages: 'auto' = each page's url from the CMS, or a pattern like /{slug}
   unmatchedRows: 'empty-page',  // workbook mode: rows with no D10 match become 'empty-page' | 'skip'
+  embeddedPageCards: true,      // D10 "embedded pages" sections become link cards in the page's right column
+  modules: [],                  // module types to import as pages (see lib/modules.js), e.g. ['news', 'jobs']
+  moduleMenu: true,             // add each module's listing page to the primary menu
+  timeZone: '',                 // the site's time zone for module date-times (D10 stores them in UTC)
   limit: 0                      // 0 = all pages; otherwise a small test run
 });
 
 // Options that must stay the same for the whole of a run (resume rebuilds the same plan).
-const RUN_LOCKED = ['menuSource', 'pageContent', 'unpublishedSourceAs', 'includeAttachments', 'uploadMedia', 'unmatchedRows', 'faqAccordions'];
+const RUN_LOCKED = ['menuSource', 'pageContent', 'unpublishedSourceAs', 'includeAttachments', 'uploadMedia', 'unmatchedRows', 'faqAccordions',
+  'embeddedPageCards', 'modules', 'moduleMenu', 'timeZone'];
+const sameOption = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 
 function normalizeOptions(o) {
   const opts = Object.assign({}, DEFAULT_OPTIONS, o || {});
@@ -1639,21 +1835,34 @@ function normalizeOptions(o) {
   if (opts.newsEvents !== 'skip') throw new Error('News and events can only be skipped for now');
   if (opts.pageUrlPattern !== 'auto' && !/\{slug\}/.test(opts.pageUrlPattern)) throw new Error('Page URL pattern must contain {slug}, e.g. /{slug}');
   opts.limit = Math.max(0, parseInt(opts.limit, 10) || 0);
-  for (const k of ['includeEmptyMicrosites', 'includeAttachments', 'uploadMedia', 'faqAccordions']) opts[k] = !!opts[k];
-  if (opts.pageContent === 'empty') { opts.uploadMedia = false; opts.faqAccordions = false; }
+  for (const k of ['includeEmptyMicrosites', 'includeAttachments', 'uploadMedia', 'faqAccordions', 'embeddedPageCards', 'moduleMenu']) opts[k] = !!opts[k];
+  opts.modules = [...new Set(opts.modules || [])];
+  for (const t of opts.modules) if (!MODULES[t]) throw new Error('Unknown module type "' + t + '"');
+  opts.modules.sort((a, b) => Object.keys(MODULES).indexOf(a) - Object.keys(MODULES).indexOf(b));
+  if (opts.pageContent === 'empty') opts.faqAccordions = false;
+  // Module entries always get their content, so uploads stay possible in empty mode when modules are chosen.
+  if (opts.pageContent === 'empty' && !opts.modules.length) opts.uploadMedia = false;
   return opts;
 }
 
 // tree: [{ key, sourceType, source, title, children }] from navFromD10 or the workbook matcher.
 // source is the D10 page/microsite summary, or null for a workbook row with no D10 match (an empty page).
-// idx: links.buildLinkIndex(exp), needed to list the media pages reference.
-// Returns { options, pages, menu, media }.
+// idx: links.buildLinkIndex(exp), needed for media, FAQs and cards. exp: the loaded export, needed for modules.
+// Returns { options, pages, menu, media, cardIssues }.
 //   pages: one per distinct page key, parents first. Two menu items may point at the same page.
-//   menu:  one per tree node; parentKey is another menu item's key, weight = sibling order.
-//   media: media ids to upload (content mode with uploadMedia).
-function buildPlan(tree, options, idx) {
+//          page.cards: [{ column: 'main'|'gutter', title, keys, orderBy, perPage }] = Teaser sections of link cards.
+//   menu:  one per menu item; parentKey is another menu item's key, weight = sibling order.
+//   media: media ids to upload.
+//   cardIssues: embedded-pages links that cannot become cards, with the reason.
+function buildPlan(tree, options, idx, exp) {
   const opts = normalizeOptions(options);
-  const pages = [], menu = [], seen = new Set(), media = [];
+  const pages = [], menu = [], seen = new Set(), media = [], cardIssues = [];
+  const addMedia = page => {
+    if (!opts.uploadMedia || !idx || page.content !== 'content') return;
+    const html = page.bodyHtml + page.faqs.map(q => q.answerHtml).join('');
+    for (const mid of referencedMedia(idx, html, page.attachments)) if (!media.includes(mid)) media.push(mid);
+  };
+
   const walk = (nodes, parentMenuKey, path) => {
     nodes.forEach((n, i) => {
       const src = n.source;
@@ -1667,13 +1876,11 @@ function buildPlan(tree, options, idx) {
           content: withContent ? 'content' : 'empty', hasBody: !!(src && src.hasBody), notes: (src && src.notes) || [],
           bodyHtml: withContent ? src.bodyHtml : '', attachments: withContent && opts.includeAttachments ? (src.attachments || []) : [],
           faqs: withContent && opts.faqAccordions ? faqsFor(src, idx) : [],
+          cards: [], embedded: (opts.embeddedPageCards && src && src.embeddedPages) || [],
           row: n.row || null
         };
         pages.push(page);
-        if (withContent && opts.uploadMedia && idx) {
-          const html = page.bodyHtml + page.faqs.map(q => q.answerHtml).join('');
-          for (const mid of referencedMedia(idx, html, page.attachments)) if (!media.includes(mid)) media.push(mid);
-        }
+        addMedia(page);
       }
       const menuKey = 'menu:' + (n.menuKey || n.key);
       menu.push({ key: menuKey, pageKey: n.key, parentKey: parentMenuKey, weight: i, title: n.title, level: path.length + 1, path: path.join(' > '), row: n.row || null });
@@ -1681,7 +1888,52 @@ function buildPlan(tree, options, idx) {
     });
   };
   walk(tree, null, []);
-  return { options: opts, pages, menu, media };
+
+  // Modules: a listing page per type (cards for every entry) and a page per entry.
+  let topWeight = tree.length;
+  for (const type of opts.modules) {
+    if (!exp) throw new Error('Module import needs the export');
+    const def = MODULES[type];
+    const all = moduleEntries(exp, type, { timeZone: opts.timeZone || 'UTC' });
+    const entries = opts.limit ? all.slice(0, opts.limit) : all; // a test run takes the first few of each module
+    const listKey = 'list:' + type;
+    pages.push({
+      key: listKey, title: def.label, sourceType: 'listing', nid: '', alias: '', sourcePublished: true, unpublished: false,
+      content: 'empty', hasBody: false, notes: [], bodyHtml: '', attachments: [], faqs: [], embedded: [], row: null, moduleType: type,
+      cards: entries.length ? [{ column: 'main', title: '', keys: entries.map(e => e.key), orderBy: def.order, perPage: 12 }] : []
+    });
+    if (opts.moduleMenu) menu.push({ key: 'menu:' + listKey, pageKey: listKey, parentKey: null, weight: topWeight++, title: def.label, level: 1, path: '', row: null });
+    for (const e of entries) {
+      const page = {
+        key: e.key, title: e.title, sourceType: type, nid: e.nid, alias: e.alias, sourcePublished: e.published,
+        unpublished: !e.published && opts.unpublishedSourceAs === 'unpublished', content: 'content', hasBody: !!e.bodyHtml.trim(),
+        notes: e.notes, bodyHtml: e.bodyHtml, attachments: opts.includeAttachments ? e.attachments : [], faqs: [], cards: [], embedded: [],
+        row: null, moduleType: type, listKey, publishedAt: e.publishedAt
+      };
+      pages.push(page);
+      addMedia(page);
+    }
+  }
+
+  // Right-column cards from D10 "embedded pages" sections, now that every page key is known.
+  const keys = new Set(pages.map(p => p.key));
+  const keyOf = nid => { const n = idx && idx.nodes.get(nid); return !n ? null : (n.kind === 'news' ? 'news:' : n.sourceType + ':') + nid; };
+  for (const p of pages) {
+    for (const sec of p.embedded) {
+      const found = [];
+      for (const nid of sec.nids) {
+        const k = keyOf(nid);
+        if (k && keys.has(k)) { if (!found.includes(k)) found.push(k); continue; }
+        const n = idx && idx.nodes.get(nid);
+        cardIssues.push({ page: p.title, nid: p.nid, section: sec.header, target: nid, targetTitle: n ? n.title : '',
+          reason: !n ? 'not in the export' : n.kind === 'news' || MODULES[n.kind] ? n.kind + ' item; select that module to import it' : 'that page is not imported' });
+      }
+      if (!sec.nids.length) cardIssues.push({ page: p.title, nid: p.nid, section: sec.header, target: '', targetTitle: '', reason: 'section lists no pages' });
+      if (found.length) p.cards.push({ column: 'gutter', title: sec.header, keys: found, orderBy: 'manual', perPage: Math.max(found.length, 3) });
+    }
+    delete p.embedded;
+  }
+  return { options: opts, pages, menu, media, cardIssues };
 }
 
 // The published FAQs a page's D10 FAQ sections show, section by section, each in D10 order.
@@ -1695,29 +1947,33 @@ function faqsFor(src, idx) {
 }
 
 function bodyLabel(p) {
+  if (p.sourceType === 'listing') return 'cards for ' + (p.cards[0] ? p.cards[0].keys.length : 0) + ' entries';
   if (p.content === 'content') return p.hasBody || p.attachments.length || p.faqs.length ? 'converted' : 'empty (no D10 body)';
   if (!p.nid) return 'empty (no D10 match)';
   return p.hasBody ? 'empty (D10 body not imported)' : 'empty';
 }
 
-// One row per planned menu item, in menu order, for the dry-run report.
+// One row per planned page, menu items first (in menu order), then pages with no menu item (module entries).
 // contentByKey (optional): page key -> { warnings, links } from the dry-run conversion.
 function planReportRows(plan, contentByKey) {
   const pageByKey = new Map(plan.pages.map(p => [p.key, p]));
-  return plan.menu.map(m => {
-    const p = pageByKey.get(m.pageKey);
+  const row = (p, m) => {
     const c = contentByKey && contentByKey.get(p.key);
     const count = o => c ? c.links.filter(l => l.outcome === o).length : '';
+    const list = p.listKey ? pageByKey.get(p.listKey) : null;
     return {
-      level: m.level, menuPath: m.path, title: m.title, order: m.weight + 1, row: m.row || '',
+      level: m ? m.level : '', menuPath: m ? m.path : (list ? 'listed on ' + list.title : ''), title: p.title, order: m ? m.weight + 1 : '', row: m && m.row ? m.row : '',
       sourceType: p.sourceType, nid: p.nid, oldUrl: p.alias,
       d10Published: p.nid ? (p.sourcePublished ? 'yes' : 'no') : '', importAs: p.unpublished ? 'unpublished' : 'published',
       body: bodyLabel(p), attachments: p.attachments.length || '', faqs: p.faqs.length || '',
+      cards: p.cards.filter(x => x.column === 'gutter').reduce((s, x) => s + x.keys.length, 0) || '',
       linksToPages: count('page'), linksToMedia: count('media'), linksToOldSite: count('old-site'),
       dropped: c ? c.warnings.map(w => w.code).join(' ') : '',
       notes: p.notes.filter(n => p.content !== 'content' || !/attachments/i.test(n) || !p.attachments.length).join('; ')
     };
-  });
+  };
+  const inMenu = new Set(plan.menu.map(m => m.pageKey));
+  return plan.menu.map(m => row(pageByKey.get(m.pageKey), m)).concat(plan.pages.filter(p => !inMenu.has(p.key)).map(p => row(p, null)));
 }
 
 // Plain-text outline of the tree for the preview pane.
@@ -1727,7 +1983,7 @@ function outline(plan, max) {
   return lines.join('\n');
 }
 
-module.exports = { DEFAULT_OPTIONS, RUN_LOCKED, normalizeOptions, buildPlan, planReportRows, outline };
+module.exports = { DEFAULT_OPTIONS, RUN_LOCKED, sameOption, normalizeOptions, buildPlan, planReportRows, outline };
 
   },
   "lib/reports": function (module, exports, require) {
@@ -1786,20 +2042,20 @@ function outOfScopeReport(exp) {
   };
   const r = exp.raw;
   count('FAQs', r.faqs, 'Imported as accordions on the pages whose FAQ sections show them (content mode). FAQs no page shows are not imported; see the FAQ report.');
-  count('Meetings', r.meetings, 'Module content (agendas and minutes).');
-  count('Directory listings', r.directory_listings, 'Module content.');
-  count('Business directory', r.business_directory, 'Module content.');
-  count('Parks', r.parks, 'Module content.');
-  count('Bids and RFPs', r.bids_rfps, 'Module content.');
-  count('Jobs', r.jobs, 'Module content.');
-  count('Ordinances', r.ordinances, 'Module content.');
-  count('Projects', r.projects, 'Module content.');
-  count('Property listings', r.property_listings, 'Module content.');
-  count('Locations', r.standard_locations, 'Module content.');
+  count('Meetings', r.meetings, 'Not imported yet (waiting for a Streamline meetings update).');
+  count('Directory listings', r.directory_listings, 'People: not imported yet (waiting for a Streamline update).');
+  count('Business directory', r.business_directory, 'Imported as pages when Business Directory is selected under Module content.');
+  count('Parks', r.parks, 'Imported as pages when Parks is selected under Module content.');
+  count('Bids and RFPs', r.bids_rfps, 'Imported as pages when Bids & RFPs is selected under Module content.');
+  count('Jobs', r.jobs, 'Imported as pages when Job Openings is selected under Module content.');
+  count('Ordinances', r.ordinances, 'Imported as pages when Ordinances & Resolutions is selected under Module content.');
+  count('Projects', r.projects, 'Imported as pages when Projects is selected under Module content.');
+  count('Property listings', r.property_listings, 'Not imported (no module yet; none in the sample exports).');
+  count('Locations', r.standard_locations, 'Imported as pages when Locations is selected under Module content.');
   count('Paragraphs', r.paragraphs, 'Section content used by pages and microsites (field_sections). Not imported.');
   const news = exp.pages.filter(p => p.kind === 'news'), events = exp.pages.filter(p => p.kind === 'event');
-  rows.push({ type: 'News items', records: news.length, published: news.filter(p => p.published).length, note: 'Skipped (news and events are not imported as pages).' });
-  rows.push({ type: 'Events', records: events.length, published: events.filter(p => p.published).length, note: 'Skipped (news and events are not imported as pages).' });
+  rows.push({ type: 'News items', records: news.length, published: news.filter(p => p.published).length, note: 'Imported as dated pages when News is selected under Module content; never menu pages.' });
+  rows.push({ type: 'Events', records: events.length, published: events.filter(p => p.published).length, note: 'Not imported yet (waiting for a Streamline events update).' });
   const regular = exp.pages.filter(p => p.kind === 'page');
   const has = re => regular.filter(p => p.notes.some(n => re.test(n)));
   const pr = (type, list, note) => rows.push({ type, records: list.length, published: list.filter(p => p.published).length, note });
@@ -2153,13 +2409,14 @@ module.exports = { start };
 //   menu    - create menu items top-down, linked to their pages (poc_id), in plan order
 //   media   - upload the files and images the pages link to (content mode, optional)
 //   content - write each page's converted body, with /node and /media links pointing at the new site
+//   cards   - Teasers sections of link cards: module listing pages, and right-column cards from D10 embedded pages
 //   promote - promote each page's draft
 // Every create is written to the manifest and saved before the next request, so a run that stops
 // at any point can be resumed or undone. Running the same plan again only does what is missing.
 
 const man = require('./lib/manifest');
 const { INTERIOR_STANDARD_LAYOUT_ID } = require('./api/streamline');
-const { RUN_LOCKED } = require('./lib/plan');
+const { RUN_LOCKED, sameOption } = require('./lib/plan');
 const { buildPageContent, linkedPageKeys } = require('./lib/content');
 
 class StopRequested extends Error { constructor() { super('Stopped by user'); this.name = 'StopRequested'; } }
@@ -2170,13 +2427,14 @@ async function runPlan(plan, ctx) {
   const save = () => ctx.save(m);
   const check = () => { if (ctx.shouldStop && ctx.shouldStop()) throw new StopRequested(); };
   if (m.startedAt && m.options) {
-    const changed = RUN_LOCKED.filter(k => m.options[k] !== undefined && m.options[k] !== plan.options[k]);
+    const changed = RUN_LOCKED.filter(k => m.options[k] !== undefined && !sameOption(m.options[k], plan.options[k]));
     if (changed.length) throw new Error('This run was started with different options (' + changed.join(', ') + '). Use the same options to resume, or undo the run first.');
   }
   m.options = plan.options;
   const media = plan.media || [];
   const hasContent = plan.pages.some(p => p.content === 'content');
-  const phases = ['pages', 'menu items'].concat(media.length ? ['media'] : [], hasContent ? ['content'] : [], ['promote drafts']);
+  const hasCards = plan.pages.some(p => p.cards && p.cards.length);
+  const phases = ['pages', 'menu items'].concat(media.length ? ['media'] : [], hasContent ? ['content'] : [], hasCards ? ['link cards'] : [], ['promote drafts']);
   const phase = name => log('Phase ' + (phases.indexOf(name) + 1) + ' of ' + phases.length + ': ' + name);
 
   await resolveLayout(api, m, log);
@@ -2263,6 +2521,12 @@ async function runPlan(plan, ctx) {
   if (hasContent) {
     phase('content');
     await contentPhase(plan, ctx, check, save);
+  }
+
+  // ---- link cards ----
+  if (hasCards) {
+    phase('link cards');
+    await cardsPhase(plan, ctx, check, save);
   }
 
   // ---- promote ----
@@ -2371,6 +2635,53 @@ async function contentPhase(plan, ctx, check, save) {
     if (written % 25 === 0) log('  … ' + written + ' pages written');
   }
   log('  ' + written + ' written' + (accordions ? ' (' + accordions + ' FAQ accordions)' : '') + ', ' + empty + ' had no body');
+}
+
+// Teasers sections of link cards. Each section's id, and whether its cards were added, are saved as soon as they
+// happen, so a resume finishes a half-done section instead of adding another.
+async function cardsPhase(plan, ctx, check, save) {
+  const { api, manifest: m, log } = ctx;
+  let sections = 0, cards = 0;
+  for (const p of plan.pages) {
+    if (!p.cards || !p.cards.length) continue;
+    const rec = m.pages[p.key];
+    if (!rec || rec.cardsComplete) continue;
+    check();
+    let cols = null;
+    const colId = async type => {
+      cols = cols || await api.draftColumns(rec.streamlineId);
+      const c = cols.find(x => x.columnType === type);
+      if (!c) throw new Error('Page "' + p.title + '" has no ' + type + ' column (columns: ' + cols.map(x => x.columnType).join(', ') + ')');
+      return c.id;
+    };
+    // Main-column cards go after the body and FAQ sections; right-column cards are the only sections there.
+    const mainBase = 1 + (m.pages[p.key].sectionId ? 1 : 0) + ((m.pages[p.key].faqSectionIds || []).length);
+    const ids = (m.pages[p.key].cardSectionIds || []).slice(), done = (m.pages[p.key].cardsDone || []).slice();
+    let gutterIndex = 0, mainIndex = 0;
+    for (let i = 0; i < p.cards.length; i++) {
+      check();
+      const card = p.cards[i];
+      const weight = card.column === 'gutter' ? gutterIndex++ : mainBase + mainIndex++;
+      if (!ids[i]) {
+        ids[i] = await api.addSection(rec.streamlineId, 'Teasers', await colId(card.column), weight);
+        man.recordPage(m, p.key, { cardSectionIds: ids.slice() });
+        save();
+        sections++;
+      }
+      await api.setTeaserPreferences(ids[i], { title: card.title || undefined, orderByIndex: card.orderBy, perPage: card.perPage });
+      if (!done[i]) {
+        const pocIds = card.keys.map(k => m.pages[k] && m.pages[k].streamlineId).filter(Boolean);
+        await api.addTeasers(ids[i], pocIds);
+        done[i] = true;
+        man.recordPage(m, p.key, { cardsDone: done.slice() });
+        save();
+        cards += pocIds.length;
+      }
+    }
+    man.recordPage(m, p.key, { cardsComplete: true });
+    save();
+  }
+  log('  ' + sections + ' card sections, ' + cards + ' cards');
 }
 
 // Links between imported pages need each page's address on the new site. The CMS reports it on the page's
@@ -2586,7 +2897,8 @@ module.exports = { makeDockItem, findTemplate, ICON_SVG };
 const d10 = require('../lib/d10');
 const { buildNavFromD10, limitTree } = require('../lib/navFromD10');
 const { buildPlan, planReportRows, outline, DEFAULT_OPTIONS } = require('../lib/plan');
-const { toCsv, PLAN_COLUMNS, SKIPPED_COLUMNS, LINK_COLUMNS, MEDIA_COLUMNS } = require('../lib/csv');
+const { toCsv, PLAN_COLUMNS, SKIPPED_COLUMNS, LINK_COLUMNS, MEDIA_COLUMNS, CARD_ISSUE_COLUMNS } = require('../lib/csv');
+const { MODULES, MODULE_TYPES, moduleCounts } = require('../lib/modules');
 const { buildLinkIndex } = require('../lib/links');
 const { buildPageContent, placeholderLookups } = require('../lib/content');
 const { readSiteMap } = require('../lib/sitemap');
@@ -2703,7 +3015,7 @@ function rebuildPlan() {
     state.nav = buildNavFromD10(state.exp, state.options);
     tree = state.nav.tree;
   }
-  state.plan = buildPlan(limitTree(tree, state.options.limit), state.options, state.idx);
+  state.plan = buildPlan(limitTree(tree, state.options.limit), state.options, state.idx, state.exp);
   state.preview = dryRunContent(state.plan);
 }
 
@@ -2910,6 +3222,28 @@ function openPanel() {
         body.appendChild(note('Used for links between imported pages. Leave blank: the tool reads each page\'s address from the CMS. Only set it (e.g. /{slug}) if that fails.'));
       }
 
+      body.appendChild(heading('Right column'));
+      body.appendChild(checkbox('Turn D10 "embedded pages" sections into link cards in the right column', o.embeddedPageCards, v => { o.embeddedPageCards = v; }));
+      body.appendChild(note('Square cards (Teasers, card layout), titled with the section heading. Cards only link to pages this run imports.'));
+
+      body.appendChild(heading('Module content'));
+      body.appendChild(hint('Each entry becomes a page (details, body and attachments), listed as cards on a listing page per module. Meetings, events and people are not imported yet.'));
+      const counts = moduleCounts(state.exp);
+      for (const t of MODULE_TYPES) {
+        const n = counts[t] || 0;
+        body.appendChild(checkbox(MODULES[t].label + ' (' + n + ')', o.modules.includes(t), v => { o.modules = v ? o.modules.concat(t) : o.modules.filter(x => x !== t); }, !n));
+      }
+      body.appendChild(checkbox('Add each module listing page to the primary menu', o.moduleMenu, v => { o.moduleMenu = v; }));
+      const tzRow = h('label', '', 'display:block;margin:8px 0;');
+      tzRow.appendChild(document.createTextNode('Site time zone: '));
+      const tz = document.createElement('input'); tz.type = 'text'; tz.style.cssText = 'width:220px;';
+      if (!o.timeZone) { try { o.timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'; } catch (e) { o.timeZone = 'UTC'; } }
+      tz.value = o.timeZone;
+      tz.oninput = () => { o.timeZone = tz.value.trim(); };
+      tzRow.appendChild(tz);
+      body.appendChild(tzRow);
+      body.appendChild(note('D10 stores job closing and bid due times in UTC; they are shown in this zone, e.g. America/Chicago, America/Los_Angeles.'));
+
       body.appendChild(heading('Pages that are unpublished in D10'));
       body.appendChild(radio('si-unpub', [
         { value: 'unpublished', label: 'Import them as unpublished' },
@@ -2953,6 +3287,11 @@ function openPanel() {
         ? 'Content: ' + [...pv.byKey.values()].filter(c => !c.empty).length + ' pages get their D10 body' + (o.includeAttachments ? ' and attachments' : '') + '; ' + (p.pages.length - [...pv.byKey.values()].filter(c => !c.empty || c.faqs.length).length) + ' stay empty (no body in D10).'
         : 'All pages are empty (title only).'
     ];
+    const lists = p.pages.filter(x => x.sourceType === 'listing');
+    if (lists.length) lines.push('Modules: ' + lists.map(l => l.title + ' (' + (l.cards[0] ? l.cards[0].keys.length : 0) + ')').join(', ') + '. Each entry is a page, listed as cards on its listing page' + (o.moduleMenu ? ', which gets a menu item' : '') + '.');
+    const cardPages = p.pages.filter(x => x.cards.some(c => c.column === 'gutter'));
+    if (cardPages.length) lines.push('Right-column cards: ' + cardPages.reduce((s, x) => s + x.cards.filter(c => c.column === 'gutter').reduce((t, c) => t + c.keys.length, 0), 0) + ' on ' + cardPages.length + ' page(s).');
+    if (p.cardIssues.length) lines.push('Embedded-page links that cannot become cards: ' + p.cardIssues.length + ' (see the card report).');
     const faqPages = p.pages.filter(x => x.faqs && x.faqs.length);
     if (faqPages.length) lines.push('FAQ accordions: ' + faqPages.reduce((s, x) => s + x.faqs.length, 0) + ' on ' + faqPages.length + ' page(s): ' + faqPages.slice(0, 5).map(x => x.title + ' (' + x.faqs.length + ')').join(', ') + (faqPages.length > 5 ? ', …' : '') + '.');
     const missingAtt = pv.warnings.filter(w => /attachment-missing/.test(w)).length;
@@ -3019,6 +3358,7 @@ function openPanel() {
       panel.appendChild(btn('Media report (CSV)', () => saveCsv(MEDIA_COLUMNS, p.media.map(mid => Object.assign({}, state.idx.media.get(mid), { usedBy: [...(usedBy.get(mid) || [])].join(' | ') })), 'media-' + base + '.csv')));
     }
     panel.appendChild(btn('FAQ report (CSV)', () => saveCsv(FAQ_COLUMNS, faqReport(state.exp), 'faqs-' + base + '.csv')));
+    if (p.cardIssues.length) panel.appendChild(btn('Card report (CSV)', () => saveCsv(CARD_ISSUE_COLUMNS, p.cardIssues, 'cards-not-made-' + base + '.csv')));
     panel.appendChild(btn('Not imported (CSV)', () => saveCsv(OUT_OF_SCOPE_COLUMNS, outOfScopeReport(state.exp), 'not-imported-' + base + '.csv')));
     panel.appendChild(btn('Warnings (TXT)', () => saveFile(navWarn.concat(state.exp.warnings, pv.warnings).join('\r\n'), 'warnings-' + base + '.txt', 'text/plain;charset=utf-8')));
 
@@ -3039,7 +3379,9 @@ function openPanel() {
       'Create ' + p.menu.length + ' primary menu items linked to those pages'
     ];
     if (p.media.length) steps.push('Download ' + p.media.length + ' files and images from the old site and upload them');
-    if (o.pageContent === 'content') steps.push('Write each page\'s converted content, with links pointing at the new pages and media');
+    if (o.pageContent === 'content' || o.modules.length) steps.push('Write each page\'s converted content, with links pointing at the new pages and media');
+    const cardSecs = p.pages.reduce((n, x) => n + x.cards.length, 0);
+    if (cardSecs) steps.push('Add ' + cardSecs + ' sections of link cards (module listing pages and right-column cards)');
     steps.push('Promote each page\'s draft');
     const ul = h('ul');
     steps.forEach(t => ul.appendChild(h('li', t)));
@@ -3210,5 +3552,5 @@ module.exports = { openPanel, setPlatform };
     });
     return module.exports;
   }
-  load('main').start("0.4.0");
+  load('main').start("0.5.0");
 })();

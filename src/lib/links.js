@@ -18,6 +18,18 @@ function buildLinkIndex(exp) {
   const aliases = new Map(); // normalized alias -> nid
   for (const p of exp.pages) { nodes.set(p.nid, { sourceType: 'page', kind: p.kind, title: p.title, alias: p.alias }); if (p.alias) aliases.set(normPath(p.alias), p.nid); }
   for (const m of exp.microsites) { nodes.set(m.nid, { sourceType: 'microsite', kind: 'microsite', title: m.title, alias: m.alias }); if (m.alias) aliases.set(normPath(m.alias), m.nid); }
+  // Module records (jobs, bids, parks…) are nodes too; when they are imported, links to them go to their page.
+  const { MODULES } = require('./modules');
+  for (const [type, def] of Object.entries(MODULES)) {
+    if (type === 'news') continue; // news items are page records, already above
+    for (const r of (exp.raw && exp.raw[def.file]) || []) {
+      if (!r || r.entity_id == null || !r.fields) continue;
+      const nid = String(r.entity_id), t = r.fields.title && r.fields.title[0] && r.fields.title[0].value;
+      const alias = (r.fields.path && r.fields.path[0] && r.fields.path[0].alias) || '';
+      if (!nodes.has(nid)) nodes.set(nid, { sourceType: type, kind: type, title: String(t || ''), alias });
+      if (alias) aliases.set(normPath(alias), nid);
+    }
+  }
   const media = new Map(), byUuid = new Map(), byPath = new Map();
   for (const m of exp.media || []) {
     media.set(m.mid, m);
@@ -30,7 +42,8 @@ function buildLinkIndex(exp) {
   };
 }
 
-const keyFor = (idx, nid) => { const n = idx.nodes.get(nid); return n ? n.sourceType + ':' + nid : null; };
+// The plan key of the page a node becomes: page:N, microsite:N, news:N, jobs:N, …
+const keyFor = (idx, nid) => { const n = idx.nodes.get(nid); return !n ? null : (n.kind === 'news' ? 'news:' : n.sourceType + ':') + nid; };
 
 // Classifies an href without resolving it. Returns { type, nid?, mid?, path?, url } where type is
 // 'node' | 'media' | 'file' | 'alias' | 'internal' | 'external' | 'special'.
