@@ -5,7 +5,7 @@
 const { openPanel, setPlatform } = require('./ui/panel');
 const { makeDockItem } = require('./ui/dock');
 
-/* global GM_xmlhttpRequest */
+/* global GM_xmlhttpRequest, GM_getResourceText */
 // Old-site files are on another domain, so they are fetched with GM_xmlhttpRequest (@connect in the header).
 function download(url) {
   if (typeof GM_xmlhttpRequest !== 'function') return Promise.reject(new Error('GM_xmlhttpRequest is not available (check the script\'s @grant)'));
@@ -30,7 +30,20 @@ async function storagePut(url, blob, type) {
   return r.status;
 }
 
-setPlatform({ download, storagePut });
+// SheetJS (the spreadsheet reader) is only needed for site-map workbooks. Tampermonkey keeps a copy (@resource),
+// and it is started here the first time a workbook is opened, instead of on every page the script runs on.
+let xlsx = null;
+function loadXlsx() {
+  if (xlsx) return xlsx;
+  if (typeof XLSX !== 'undefined') return (xlsx = XLSX); // the dev harness loads it with a script tag
+  if (typeof GM_getResourceText !== 'function') throw new Error('The spreadsheet reader is not available (check the script header has @grant GM_getResourceText).');
+  const code = GM_getResourceText('xlsx');
+  if (!code) throw new Error('The spreadsheet reader (SheetJS) was not downloaded. Open the script in Tampermonkey and save it again while online.');
+  xlsx = new Function(code + '\n;return XLSX;')();
+  return xlsx;
+}
+
+setPlatform({ download, storagePut, loadXlsx });
 
 const LOG = '[Importer] ';
 const DOCK_CSS = 'display:block;width:calc(100% - 16px);margin:12px 8px;padding:8px 6px;background:#fff;color:#b3121b;border:0;border-radius:4px;font:600 13px/1.2 sans-serif;cursor:pointer;';

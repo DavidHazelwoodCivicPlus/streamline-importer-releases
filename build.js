@@ -20,10 +20,12 @@ const header = `// ==UserScript==
 // @version      ${pkg.version}
 // @description  Create Streamline pages and the primary menu from a Drupal 10 export (www-*.json). Runs on any Streamline CMS admin page; does nothing elsewhere.
 // @match        https://*/*
-// @require      https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js
+// @resource     xlsx https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js
 // @grant        GM_xmlhttpRequest
+// @grant        GM_getResourceText
 // @connect      *
 // @run-at       document-idle
+// @noframes
 // @homepageURL  https://github.com/${repo.name}
 // @updateURL    ${raw('streamline-importer.meta.js')}
 // @downloadURL  ${raw('streamline-importer.user.js')}

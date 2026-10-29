@@ -149,9 +149,10 @@ async function readExportFiles(fileList) {
   return files;
 }
 
-// SheetJS is loaded by the userscript's @require. Columns stay aligned to A even when the used range starts later.
+// SheetJS is started on first use (see loadXlsx in main.js). Columns stay aligned to A even when the used range starts later.
 async function readWorkbook(file) {
-  if (typeof XLSX === 'undefined') throw new Error('The spreadsheet reader (SheetJS) did not load. Check that Tampermonkey is allowed to fetch @require scripts.');
+  const XLSX = platform.loadXlsx ? platform.loadXlsx() : (typeof window !== 'undefined' && window.XLSX);
+  if (!XLSX) throw new Error('The spreadsheet reader (SheetJS) is not available.');
   const isCsv = /\.csv$/i.test(file.name);
   const wb = isCsv ? XLSX.read(await file.text(), { type: 'string' }) : XLSX.read(await file.arrayBuffer(), { type: 'array' });
   const sheets = wb.SheetNames.map(name => {

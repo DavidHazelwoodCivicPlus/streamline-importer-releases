@@ -1,18 +1,20 @@
 // ==UserScript==
 // @name         Drupal 10 to Streamline Importer
 // @namespace    civicplus.streamline.d10importer
-// @version      0.6.2
+// @version      0.6.3
 // @description  Create Streamline pages and the primary menu from a Drupal 10 export (www-*.json). Runs on any Streamline CMS admin page; does nothing elsewhere.
 // @match        https://*/*
-// @require      https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js
+// @resource     xlsx https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js
 // @grant        GM_xmlhttpRequest
+// @grant        GM_getResourceText
 // @connect      *
 // @run-at       document-idle
+// @noframes
 // @homepageURL  https://github.com/DavidHazelwoodCivicPlus/streamline-importer-releases
 // @updateURL    https://raw.githubusercontent.com/DavidHazelwoodCivicPlus/streamline-importer-releases/main/dist/streamline-importer.meta.js
 // @downloadURL  https://raw.githubusercontent.com/DavidHazelwoodCivicPlus/streamline-importer-releases/main/dist/streamline-importer.user.js
 // ==/UserScript==
-// Built 2026-10-29T18:21:16.737Z. Do not edit; edit src/ and run "npm run build".
+// Built 2026-10-29T18:24:30.083Z. Do not edit; edit src/ and run "npm run build".
 
 (function () {
   'use strict';
@@ -2344,7 +2346,7 @@ module.exports = { isMark, findHeaderRow, findColumns, parseMenuRows, buildMenuT
 const { openPanel, setPlatform } = require('./ui/panel');
 const { makeDockItem } = require('./ui/dock');
 
-/* global GM_xmlhttpRequest */
+/* global GM_xmlhttpRequest, GM_getResourceText */
 // Old-site files are on another domain, so they are fetched with GM_xmlhttpRequest (@connect in the header).
 function download(url) {
   if (typeof GM_xmlhttpRequest !== 'function') return Promise.reject(new Error('GM_xmlhttpRequest is not available (check the script\'s @grant)'));
@@ -2369,7 +2371,20 @@ async function storagePut(url, blob, type) {
   return r.status;
 }
 
-setPlatform({ download, storagePut });
+// SheetJS (the spreadsheet reader) is only needed for site-map workbooks. Tampermonkey keeps a copy (@resource),
+// and it is started here the first time a workbook is opened, instead of on every page the script runs on.
+let xlsx = null;
+function loadXlsx() {
+  if (xlsx) return xlsx;
+  if (typeof XLSX !== 'undefined') return (xlsx = XLSX); // the dev harness loads it with a script tag
+  if (typeof GM_getResourceText !== 'function') throw new Error('The spreadsheet reader is not available (check the script header has @grant GM_getResourceText).');
+  const code = GM_getResourceText('xlsx');
+  if (!code) throw new Error('The spreadsheet reader (SheetJS) was not downloaded. Open the script in Tampermonkey and save it again while online.');
+  xlsx = new Function(code + '\n;return XLSX;')();
+  return xlsx;
+}
+
+setPlatform({ download, storagePut, loadXlsx });
 
 const LOG = '[Importer] ';
 const DOCK_CSS = 'display:block;width:calc(100% - 16px);margin:12px 8px;padding:8px 6px;background:#fff;color:#b3121b;border:0;border-radius:4px;font:600 13px/1.2 sans-serif;cursor:pointer;';
@@ -3146,9 +3161,10 @@ async function readExportFiles(fileList) {
   return files;
 }
 
-// SheetJS is loaded by the userscript's @require. Columns stay aligned to A even when the used range starts later.
+// SheetJS is started on first use (see loadXlsx in main.js). Columns stay aligned to A even when the used range starts later.
 async function readWorkbook(file) {
-  if (typeof XLSX === 'undefined') throw new Error('The spreadsheet reader (SheetJS) did not load. Check that Tampermonkey is allowed to fetch @require scripts.');
+  const XLSX = platform.loadXlsx ? platform.loadXlsx() : (typeof window !== 'undefined' && window.XLSX);
+  if (!XLSX) throw new Error('The spreadsheet reader (SheetJS) is not available.');
   const isCsv = /\.csv$/i.test(file.name);
   const wb = isCsv ? XLSX.read(await file.text(), { type: 'string' }) : XLSX.read(await file.arrayBuffer(), { type: 'array' });
   const sheets = wb.SheetNames.map(name => {
@@ -3689,5 +3705,5 @@ module.exports = { openPanel, setPlatform };
     });
     return module.exports;
   }
-  load('main').start("0.6.2");
+  load('main').start("0.6.3");
 })();
