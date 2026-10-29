@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Drupal 10 to Streamline Importer
 // @namespace    civicplus.streamline.d10importer
-// @version      0.6.0
+// @version      0.6.1
 // @description  Create Streamline pages and the primary menu from a Drupal 10 export (www-*.json). Runs on any Streamline CMS admin page; does nothing elsewhere.
 // @match        https://*/*
 // @require      https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js
@@ -12,7 +12,7 @@
 // @updateURL    https://raw.githubusercontent.com/DavidHazelwoodCivicPlus/streamline-importer-releases/main/dist/streamline-importer.meta.js
 // @downloadURL  https://raw.githubusercontent.com/DavidHazelwoodCivicPlus/streamline-importer-releases/main/dist/streamline-importer.user.js
 // ==/UserScript==
-// Built 2026-10-29T15:49:25.158Z. Do not edit; edit src/ and run "npm run build".
+// Built 2026-10-29T16:32:56.319Z. Do not edit; edit src/ and run "npm run build".
 
 (function () {
   'use strict';
@@ -41,10 +41,15 @@ function makeClient(transport, opts) {
   if (opts.allowedHosts && !opts.allowedHosts.includes(opts.host)) throw new Error('Refusing to run against ' + opts.host + '. Allowed: ' + opts.allowedHosts.join(', '));
   let last = 0, count = 0;
 
-  async function throttle() {
-    const wait = last + opts.minIntervalMs - Date.now();
-    if (wait > 0) await opts.sleep(wait);
-    last = Date.now();
+  // Requests start at least minIntervalMs apart, even when several are in flight at once (a queue of starts).
+  let gate = Promise.resolve();
+  function throttle() {
+    gate = gate.then(async () => {
+      const wait = last + opts.minIntervalMs - Date.now();
+      if (wait > 0) await opts.sleep(wait);
+      last = Date.now();
+    });
+    return gate;
   }
 
   async function request(method, path, body) {
@@ -2802,6 +2807,15 @@ async function undoRun(ctx) {
   log('Undo finished');
 }
 
+// Runs fn over items with up to n calls in flight. The API client still spaces out when each request starts;
+// this only stops one slow server reply from holding up the next delete.
+async function pool(items, n, fn) {
+  let next = 0;
+  const worker = async () => { while (next < items.length) { const i = next++; await fn(items[i], i); } };
+  await Promise.all(Array.from({ length: Math.min(n, items.length) }, worker));
+}
+const WIPE_PARALLEL = 4;
+
 // Kinds of content "Erase this site" deletes. The homepage stays (the site needs it), and so do products
 // (payments) and profiles, which are not page content.
 const WIPE_POC_TYPES = ['page', 'event', 'meeting', 'group', 'external'];
@@ -2824,13 +2838,22 @@ async function wipeSite(api, opts, ctx) {
   log('Deleting ' + itemCount + ' menu item(s) in ' + menus.length + ' menu(s), ' + pocs.length + ' page(s)' + (opts.media ? ', ' + files.length + ' file(s) and ' + images.length + ' image(s)' : '') + '.');
 
   // Menus first, children before parents, re-reading until none are left (as removeAllMenuItems does).
+  let gone = 0;
   for (const mnu of menus) {
     for (let pass = 0; pass < 4; pass++) {
       const live = await api.menuItems(mnu.id);
       if (!live.length) break;
       const byId = new Map(live.map(i => [String(i.id), i]));
       const depth = i => { let d = 0, p = i.parent_id; while (p != null && byId.has(String(p)) && d < 20) { d++; p = byId.get(String(p)).parent_id; } return d; };
-      for (const it of live.sort((a, b) => depth(b) - depth(a))) { check(); await api.softDeleteMenuItem(it); }
+      // Deepest level first; the items of one level do not depend on each other, so they go in parallel.
+      const levels = [...new Set(live.map(depth))].sort((a, b) => b - a);
+      for (const lv of levels) {
+        await pool(live.filter(i => depth(i) === lv), WIPE_PARALLEL, async it => {
+          check();
+          await api.softDeleteMenuItem(it);
+          if (++gone % 25 === 0) log('  … ' + gone + ' / ' + itemCount + ' menu items');
+        });
+      }
     }
     const left = await api.menuItems(mnu.id);
     if (left.length) throw new Error(left.length + ' item(s) still in the ' + mnu.name + ' menu: ' + left.slice(0, 5).map(i => i.title).join(', '));
@@ -2838,17 +2861,18 @@ async function wipeSite(api, opts, ctx) {
   log('  menus cleared');
 
   let n = 0;
-  for (const p of pocs) {
+  await pool(pocs, WIPE_PARALLEL, async p => {
     check();
     await api.deletePage(p.id);
     if (++n % 25 === 0) log('  … ' + n + ' / ' + pocs.length + ' pages');
-  }
+  });
   log('  ' + n + ' page(s) deleted');
 
   if (opts.media) {
     let f = 0, im = 0;
-    for (const x of files) { check(); await api.deleteMedia('file', x.id).catch(e => { if (!/not found|could not find|couldn.t find/i.test(e.message)) throw e; }); if (++f % 25 === 0) log('  … ' + f + ' / ' + files.length + ' files'); }
-    for (const x of images) { check(); await api.deleteMedia('image', x.id).catch(e => { if (!/not found|could not find|couldn.t find/i.test(e.message)) throw e; }); if (++im % 25 === 0) log('  … ' + im + ' / ' + images.length + ' images'); }
+    const gone = e => { if (!/not found|could not find|couldn.t find/i.test(e.message)) throw e; };
+    await pool(files, WIPE_PARALLEL, async x => { check(); await api.deleteMedia('file', x.id).catch(gone); if (++f % 25 === 0) log('  … ' + f + ' / ' + files.length + ' files'); });
+    await pool(images, WIPE_PARALLEL, async x => { check(); await api.deleteMedia('image', x.id).catch(gone); if (++im % 25 === 0) log('  … ' + im + ' / ' + images.length + ' images'); });
     log('  ' + f + ' file(s) and ' + im + ' image(s) deleted');
   }
 
@@ -3662,5 +3686,5 @@ module.exports = { openPanel, setPlatform };
     });
     return module.exports;
   }
-  load('main').start("0.6.0");
+  load('main').start("0.6.1");
 })();

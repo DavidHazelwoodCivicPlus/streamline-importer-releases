@@ -52,3 +52,11 @@ test('every source file and the built userscript parse', () => {
   if (fs.existsSync(built)) files.push(built);
   for (const f of files) execFileSync(process.execPath, ['--check', f]); // throws with the syntax error
 });
+
+test('requests in flight at the same time still start minIntervalMs apart', async () => {
+  const starts = [];
+  const c = makeClient(async () => { starts.push(Date.now()); await new Promise(r => setTimeout(r, 30)); return res(200, {}); }, { host: HOST, minIntervalMs: 25 });
+  await Promise.all([c.request('GET', '/a'), c.request('GET', '/b'), c.request('GET', '/c'), c.request('GET', '/d')]);
+  for (let i = 1; i < starts.length; i++) assert.ok(starts[i] - starts[i - 1] >= 20, 'gap ' + (starts[i] - starts[i - 1]) + 'ms');
+  assert.ok(starts[3] - starts[0] < 30 * 4, 'they overlap rather than run one after another');
+});

@@ -21,10 +21,15 @@ function makeClient(transport, opts) {
   if (opts.allowedHosts && !opts.allowedHosts.includes(opts.host)) throw new Error('Refusing to run against ' + opts.host + '. Allowed: ' + opts.allowedHosts.join(', '));
   let last = 0, count = 0;
 
-  async function throttle() {
-    const wait = last + opts.minIntervalMs - Date.now();
-    if (wait > 0) await opts.sleep(wait);
-    last = Date.now();
+  // Requests start at least minIntervalMs apart, even when several are in flight at once (a queue of starts).
+  let gate = Promise.resolve();
+  function throttle() {
+    gate = gate.then(async () => {
+      const wait = last + opts.minIntervalMs - Date.now();
+      if (wait > 0) await opts.sleep(wait);
+      last = Date.now();
+    });
+    return gate;
   }
 
   async function request(method, path, body) {
