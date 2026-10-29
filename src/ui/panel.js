@@ -567,7 +567,7 @@ function openPanel() {
       removeAllMenuItems(a, 'primary', snap => saveFile(JSON.stringify(snap, null, 2), 'snapshot-primary-' + stamp() + '.json'), log)
         .then(() => { log('✓ Primary menu is empty'); done(true); }, fail);
     } else if (kind === 'wipe') {
-      wipeSite(a, wipeOpts, { log, shouldStop: () => stop, host: location.host, snapshot: snap => saveFile(JSON.stringify(snap, null, 2), 'erase-snapshot-' + location.host.replace(/[^w.-]+/g, '_') + '-' + stamp() + '.json') })
+      wipeSite(a, wipeOpts, { log, shouldStop: () => stop, host: location.host, snapshot: snap => saveFile(JSON.stringify(snap, null, 2), 'erase-snapshot-' + location.host.replace(/[^\w.-]+/g, '_') + '-' + stamp() + '.json') })
         .then(s => {
           // Everything a recorded run made is gone too, so its manifest no longer means anything here.
           clearStoredManifest(); state.manifest = null;

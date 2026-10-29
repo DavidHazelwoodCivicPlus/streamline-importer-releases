@@ -12,7 +12,7 @@
 // @updateURL    https://raw.githubusercontent.com/DavidHazelwoodCivicPlus/streamline-importer-releases/main/dist/streamline-importer.meta.js
 // @downloadURL  https://raw.githubusercontent.com/DavidHazelwoodCivicPlus/streamline-importer-releases/main/dist/streamline-importer.user.js
 // ==/UserScript==
-// Built 2026-10-29T15:48:59.388Z. Do not edit; edit src/ and run "npm run build".
+// Built 2026-10-29T15:49:25.158Z. Do not edit; edit src/ and run "npm run build".
 
 (function () {
   'use strict';
@@ -3540,7 +3540,7 @@ function openPanel() {
       removeAllMenuItems(a, 'primary', snap => saveFile(JSON.stringify(snap, null, 2), 'snapshot-primary-' + stamp() + '.json'), log)
         .then(() => { log('✓ Primary menu is empty'); done(true); }, fail);
     } else if (kind === 'wipe') {
-      wipeSite(a, wipeOpts, { log, shouldStop: () => stop, host: location.host, snapshot: snap => saveFile(JSON.stringify(snap, null, 2), 'erase-snapshot-' + location.host.replace(/[^w.-]+/g, '_') + '-' + stamp() + '.json') })
+      wipeSite(a, wipeOpts, { log, shouldStop: () => stop, host: location.host, snapshot: snap => saveFile(JSON.stringify(snap, null, 2), 'erase-snapshot-' + location.host.replace(/[^\w.-]+/g, '_') + '-' + stamp() + '.json') })
         .then(s => {
           // Everything a recorded run made is gone too, so its manifest no longer means anything here.
           clearStoredManifest(); state.manifest = null;
