@@ -1,8 +1,10 @@
 'use strict';
-// Userscript entry. The script is matched on every https page, so it first checks that the page is a
-// Streamline CMS admin page (the CMS dock), and does nothing anywhere else.
+// Userscript entry. The script is matched on every https page but only runs on the sites it is turned on for
+// (Tampermonkey menu: Turn on D10 Importer for this site / Choose D10 Importer sites…). Everywhere else it does nothing.
 
 const { openPanel, setPlatform } = require('./ui/panel');
+const { SANDBOX_HOST } = require('./api/client');
+const { parseSiteList, isEnabled, withSite, withoutSite } = require('./lib/sites');
 const { makeDockItem } = require('./ui/dock');
 
 /* global GM_xmlhttpRequest, GM_getResourceText */
@@ -75,32 +77,66 @@ function addButton() {
   return true;
 }
 
-// Streamline admin pages carry a <dock> element (the CMS dock). A login cookie alone is not enough: many sites set XSRF-TOKEN.
-const onSpecialDistrict = () => /(^|\.)specialdistrict\.org$/i.test(location.hostname);
-const looksLikeStreamline = () => !!document.querySelector('dock') || (onSpecialDistrict() && /XSRF-TOKEN=/.test(document.cookie));
-
 function addFloatingButton() {
   if (document.getElementById('si-open')) return;
-  if (!looksLikeStreamline()) return;
   document.body.appendChild(makeButton(FLOAT_CSS, true));
   console.warn(LOG + '#dock-menu not found; showing a floating button instead.');
 }
 
-// The CMS can redraw its dock (navigating between admin screens); put the item back when that happens.
-function keepInDock() {
-  setInterval(() => { if (!document.getElementById('si-open')) addButton(); }, 3000);
+// ---------- Which sites the importer is on for ----------
+/* global GM_getValue, GM_setValue, GM_registerMenuCommand */
+const SITES_KEY = 'sites';
+const hasGM = typeof GM_getValue === 'function' && typeof GM_setValue === 'function';
+// The test sandbox is on until the list is first changed. Without Tampermonkey storage (the dev harness),
+// the importer is on for the current site.
+const readSites = () => (hasGM ? GM_getValue(SITES_KEY, [SANDBOX_HOST]) : [location.host.toLowerCase()]);
+const writeSites = list => { if (hasGM) GM_setValue(SITES_KEY, list); };
+
+// Looks for the dock for up to 20 seconds, adds the item once, then stops. Nothing keeps running afterwards.
+let started = false;
+function addOnce(version) {
+  if (started) return;
+  started = true;
+  let tries = 0;
+  const timer = setInterval(() => {
+    tries++;
+    if (addButton()) { clearInterval(timer); console.log(LOG + 'v' + version + ' ready on ' + location.host); return; }
+    if (tries >= 20) { clearInterval(timer); addFloatingButton(); }
+  }, 1000);
+}
+
+function registerMenu(version) {
+  if (typeof GM_registerMenuCommand !== 'function') return;
+  const host = location.host.toLowerCase();
+  if (isEnabled(readSites(), host)) {
+    GM_registerMenuCommand('Open D10 Importer', () => openPanel());
+    GM_registerMenuCommand('Turn off D10 Importer for ' + host, () => {
+      writeSites(withoutSite(readSites(), host));
+      const b = document.getElementById('si-open'); if (b) b.remove();
+      alert('D10 Importer is off for ' + host + '. It will not run on this site until you turn it on again.');
+    });
+  } else {
+    GM_registerMenuCommand('Turn on D10 Importer for ' + host, () => {
+      writeSites(withSite(readSites(), host));
+      addOnce(version);
+      alert('D10 Importer is on for ' + host + '. It appears in the CMS dock (or as a red button) within a few seconds.');
+    });
+  }
+  GM_registerMenuCommand('Choose D10 Importer sites…', () => {
+    const now = readSites();
+    const text = prompt('Sites the D10 Importer runs on, separated by commas (addresses or full URLs):', now.join(', '));
+    if (text == null) return;
+    const list = parseSiteList(text);
+    writeSites(list);
+    alert(list.length ? 'D10 Importer now runs on:\n' + list.join('\n') + '\n\nReload a site\'s page to see the change there.' : 'D10 Importer is now off for every site.');
+  });
 }
 
 function start(version) {
   if (window.top !== window.self) return; // not inside frames
-  let tries = 0;
-  const timer = setInterval(() => {
-    tries++;
-    if (addButton()) { clearInterval(timer); console.log(LOG + 'v' + version + ' ready on ' + location.host); keepInDock(); return; }
-    if (tries === 10) addFloatingButton();
-    // Not a Streamline page after 30 seconds: stop looking. A Streamline page keeps waiting for a late dock, up to 5 minutes.
-    if ((tries >= 30 && !looksLikeStreamline()) || tries >= 300) clearInterval(timer);
-  }, 1000);
+  registerMenu(version);
+  if (!isEnabled(readSites(), location.host)) return; // not a site it is on for: nothing runs
+  addOnce(version);
 }
 
 module.exports = { start };

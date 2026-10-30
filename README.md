@@ -4,13 +4,14 @@ Tampermonkey userscript that migrates a Drupal 10 site into Streamline CMS (Ampl
 
 It creates pages (empty, or with their converted D10 body), the primary menu linked to them, uploads the files and images those pages link to, and points `/node/N` and `/media/N` links at the new pages and files. FAQs, meetings, directories and other module content are reported, not imported.
 
-Runs on any Streamline CMS admin page: Tampermonkey loads it on every https page, and it only adds its button where the CMS dock is present. On any site other than the test sandbox (davidhazelwoodcpsandbox.specialdistrict.org), running, undoing and removing ask you to type the site's address first. The dev tools in `tools/` only ever talk to the sandbox.
+Runs only on the Streamline sites you turn it on for. Tampermonkey loads it on every https page, but on any site not in your list it does nothing at all (no button, no timers). The test sandbox is on by default. On any site other than the test sandbox (davidhazelwoodcpsandbox.specialdistrict.org), running, undoing and removing ask you to type the site's address first. The dev tools in `tools/` only ever talk to the sandbox.
 
 ## Install (once per person)
 
 1. Install the Tampermonkey extension (Chrome, Edge or Firefox). In Chrome and Edge, turn on **Allow User Scripts** in the extension's settings.
-2. Open **https://raw.githubusercontent.com/DavidHazelwoodCivicPlus/streamline-importer-releases/main/dist/streamline-importer.user.js** and click **Install**. Tampermonkey says the script can run on all sites; it only shows itself on Streamline admin pages.
-3. Updates install themselves: Tampermonkey checks about once a day. To get one right away: Tampermonkey dashboard → **Utilities** or the script's menu → **Check for userscript updates**.
+2. Open **https://raw.githubusercontent.com/DavidHazelwoodCivicPlus/streamline-importer-releases/main/dist/streamline-importer.user.js** and click **Install**. Tampermonkey says the script can run on all sites; it only shows itself on the sites you turn it on for (next step).
+3. Turn it on for each site you are working on: open that site's CMS, click the Tampermonkey icon in the browser toolbar → **Turn on D10 Importer for <site>**. **Choose D10 Importer sites…** in the same menu shows the whole list to edit (addresses or full URLs, separated by commas), and **Turn off D10 Importer for <site>** removes one. **Open D10 Importer** opens it even if the dock item is missing.
+4. Updates install themselves: Tampermonkey checks about once a day. To get one right away: Tampermonkey dashboard → **Utilities** or the script's menu → **Check for userscript updates**.
 
 If you had pasted an earlier copy by hand, delete that copy in the Tampermonkey dashboard so only the installed one runs.
 
@@ -23,7 +24,7 @@ The releases repo is public. It gets every tracked file except the Streamline AP
 
 ## Use it
 
-1. Sign in to the site's CMS. **D10 Importer** appears in the dock above Support: an import icon (a page with an arrow) when the dock is collapsed, with its label when it expands. If the dock's items cannot be copied, a plain button appears under the menu instead.
+1. Sign in to the site's CMS (turned on for this site, see Install). **D10 Importer** appears in the dock above Support: an import icon (a page with an arrow) when the dock is collapsed, with its label when it expands. If the dock's items cannot be copied, a plain button appears under the menu instead.
 2. Open it. A banner names the site (green for the sandbox, red for a live site). Tampermonkey asks once to allow downloads from the old site the first time media is uploaded.
 3. **Load:** the folder with the `www-*.json` files. Optionally a site-map workbook and an override CSV.
 4. **Options:** menu source (D10 data or site map), empty pages or pages with content, attachments, media upload, page URL pattern, unpublished pages, test-run limit.

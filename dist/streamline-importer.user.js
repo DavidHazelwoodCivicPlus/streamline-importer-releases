@@ -1,12 +1,15 @@
 // ==UserScript==
 // @name         Drupal 10 to Streamline Importer
 // @namespace    civicplus.streamline.d10importer
-// @version      0.6.3
-// @description  Create Streamline pages and the primary menu from a Drupal 10 export (www-*.json). Runs on any Streamline CMS admin page; does nothing elsewhere.
+// @version      0.7.0
+// @description  Create Streamline pages and the primary menu from a Drupal 10 export (www-*.json). Runs only on the Streamline sites you turn it on for (Tampermonkey menu).
 // @match        https://*/*
 // @resource     xlsx https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js
 // @grant        GM_xmlhttpRequest
 // @grant        GM_getResourceText
+// @grant        GM_getValue
+// @grant        GM_setValue
+// @grant        GM_registerMenuCommand
 // @connect      *
 // @run-at       document-idle
 // @noframes
@@ -14,7 +17,7 @@
 // @updateURL    https://raw.githubusercontent.com/DavidHazelwoodCivicPlus/streamline-importer-releases/main/dist/streamline-importer.meta.js
 // @downloadURL  https://raw.githubusercontent.com/DavidHazelwoodCivicPlus/streamline-importer-releases/main/dist/streamline-importer.user.js
 // ==/UserScript==
-// Built 2026-10-29T18:24:30.083Z. Do not edit; edit src/ and run "npm run build".
+// Built 2026-10-30T17:29:30.003Z. Do not edit; edit src/ and run "npm run build".
 
 (function () {
   'use strict';
@@ -2338,12 +2341,41 @@ function readSiteMap(sheets) {
 module.exports = { isMark, findHeaderRow, findColumns, parseMenuRows, buildMenuTree, readSiteMap, colLetter };
 
   },
+  "lib/sites": function (module, exports, require) {
+'use strict';
+// The list of sites the importer is turned on for. The userscript matches every https page, but does
+// nothing at all on a site that is not in this list. Pure helpers; storage is the caller's (GM_getValue).
+
+// "https://Foo.org/admin, bar.specialdistrict.org ; baz.gov" -> ['foo.org', 'bar.specialdistrict.org', 'baz.gov']
+function parseSiteList(text) {
+  const out = [];
+  for (const raw of String(text || '').split(/[\s,;]+/)) {
+    const s = raw.trim();
+    if (!s) continue;
+    let host = s;
+    try { if (/^[a-z]+:\/\//i.test(s)) host = new URL(s).host; } catch (e) { continue; }
+    host = host.replace(/\/.*$/, '').toLowerCase();
+    if (/^[a-z0-9.-]+(:\d+)?$/.test(host) && !out.includes(host)) out.push(host);
+  }
+  return out;
+}
+
+const isEnabled = (list, host) => (list || []).includes(String(host || '').toLowerCase());
+
+function withSite(list, host) { const h = String(host).toLowerCase(); return (list || []).includes(h) ? list.slice() : (list || []).concat(h); }
+function withoutSite(list, host) { const h = String(host).toLowerCase(); return (list || []).filter(x => x !== h); }
+
+module.exports = { parseSiteList, isEnabled, withSite, withoutSite };
+
+  },
   "main": function (module, exports, require) {
 'use strict';
-// Userscript entry. The script is matched on every https page, so it first checks that the page is a
-// Streamline CMS admin page (the CMS dock), and does nothing anywhere else.
+// Userscript entry. The script is matched on every https page but only runs on the sites it is turned on for
+// (Tampermonkey menu: Turn on D10 Importer for this site / Choose D10 Importer sites…). Everywhere else it does nothing.
 
 const { openPanel, setPlatform } = require('./ui/panel');
+const { SANDBOX_HOST } = require('./api/client');
+const { parseSiteList, isEnabled, withSite, withoutSite } = require('./lib/sites');
 const { makeDockItem } = require('./ui/dock');
 
 /* global GM_xmlhttpRequest, GM_getResourceText */
@@ -2416,32 +2448,66 @@ function addButton() {
   return true;
 }
 
-// Streamline admin pages carry a <dock> element (the CMS dock). A login cookie alone is not enough: many sites set XSRF-TOKEN.
-const onSpecialDistrict = () => /(^|\.)specialdistrict\.org$/i.test(location.hostname);
-const looksLikeStreamline = () => !!document.querySelector('dock') || (onSpecialDistrict() && /XSRF-TOKEN=/.test(document.cookie));
-
 function addFloatingButton() {
   if (document.getElementById('si-open')) return;
-  if (!looksLikeStreamline()) return;
   document.body.appendChild(makeButton(FLOAT_CSS, true));
   console.warn(LOG + '#dock-menu not found; showing a floating button instead.');
 }
 
-// The CMS can redraw its dock (navigating between admin screens); put the item back when that happens.
-function keepInDock() {
-  setInterval(() => { if (!document.getElementById('si-open')) addButton(); }, 3000);
+// ---------- Which sites the importer is on for ----------
+/* global GM_getValue, GM_setValue, GM_registerMenuCommand */
+const SITES_KEY = 'sites';
+const hasGM = typeof GM_getValue === 'function' && typeof GM_setValue === 'function';
+// The test sandbox is on until the list is first changed. Without Tampermonkey storage (the dev harness),
+// the importer is on for the current site.
+const readSites = () => (hasGM ? GM_getValue(SITES_KEY, [SANDBOX_HOST]) : [location.host.toLowerCase()]);
+const writeSites = list => { if (hasGM) GM_setValue(SITES_KEY, list); };
+
+// Looks for the dock for up to 20 seconds, adds the item once, then stops. Nothing keeps running afterwards.
+let started = false;
+function addOnce(version) {
+  if (started) return;
+  started = true;
+  let tries = 0;
+  const timer = setInterval(() => {
+    tries++;
+    if (addButton()) { clearInterval(timer); console.log(LOG + 'v' + version + ' ready on ' + location.host); return; }
+    if (tries >= 20) { clearInterval(timer); addFloatingButton(); }
+  }, 1000);
+}
+
+function registerMenu(version) {
+  if (typeof GM_registerMenuCommand !== 'function') return;
+  const host = location.host.toLowerCase();
+  if (isEnabled(readSites(), host)) {
+    GM_registerMenuCommand('Open D10 Importer', () => openPanel());
+    GM_registerMenuCommand('Turn off D10 Importer for ' + host, () => {
+      writeSites(withoutSite(readSites(), host));
+      const b = document.getElementById('si-open'); if (b) b.remove();
+      alert('D10 Importer is off for ' + host + '. It will not run on this site until you turn it on again.');
+    });
+  } else {
+    GM_registerMenuCommand('Turn on D10 Importer for ' + host, () => {
+      writeSites(withSite(readSites(), host));
+      addOnce(version);
+      alert('D10 Importer is on for ' + host + '. It appears in the CMS dock (or as a red button) within a few seconds.');
+    });
+  }
+  GM_registerMenuCommand('Choose D10 Importer sites…', () => {
+    const now = readSites();
+    const text = prompt('Sites the D10 Importer runs on, separated by commas (addresses or full URLs):', now.join(', '));
+    if (text == null) return;
+    const list = parseSiteList(text);
+    writeSites(list);
+    alert(list.length ? 'D10 Importer now runs on:\n' + list.join('\n') + '\n\nReload a site\'s page to see the change there.' : 'D10 Importer is now off for every site.');
+  });
 }
 
 function start(version) {
   if (window.top !== window.self) return; // not inside frames
-  let tries = 0;
-  const timer = setInterval(() => {
-    tries++;
-    if (addButton()) { clearInterval(timer); console.log(LOG + 'v' + version + ' ready on ' + location.host); keepInDock(); return; }
-    if (tries === 10) addFloatingButton();
-    // Not a Streamline page after 30 seconds: stop looking. A Streamline page keeps waiting for a late dock, up to 5 minutes.
-    if ((tries >= 30 && !looksLikeStreamline()) || tries >= 300) clearInterval(timer);
-  }, 1000);
+  registerMenu(version);
+  if (!isEnabled(readSites(), location.host)) return; // not a site it is on for: nothing runs
+  addOnce(version);
 }
 
 module.exports = { start };
@@ -3705,5 +3771,5 @@ module.exports = { openPanel, setPlatform };
     });
     return module.exports;
   }
-  load('main').start("0.6.3");
+  load('main').start("0.7.0");
 })();
