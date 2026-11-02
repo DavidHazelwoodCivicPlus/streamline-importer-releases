@@ -9,18 +9,22 @@ const { makeDockItem } = require('./ui/dock');
 
 /* global GM_xmlhttpRequest, GM_getResourceText */
 // Old-site files are on another domain, so they are fetched with GM_xmlhttpRequest (@connect in the header).
-function download(url) {
+// opts.onRetry(tries, why) is told before each retry, so the progress screen can say it is still trying.
+function download(url, opts) {
   if (typeof GM_xmlhttpRequest !== 'function') return Promise.reject(new Error('GM_xmlhttpRequest is not available (check the script\'s @grant)'));
+  const onRetry = (opts && opts.onRetry) || (() => {});
   return new Promise((resolve, reject) => {
+    const retry = (n, why, wait) => { onRetry(n + 1, why); setTimeout(() => attempt(n + 1), wait); };
     const attempt = n => GM_xmlhttpRequest({
       method: 'GET', url, responseType: 'blob', timeout: 120000,
       onload: r => {
         if (r.status >= 200 && r.status < 300 && r.response) return resolve(r.response);
-        if ((r.status === 429 || r.status >= 500) && n < 3) return setTimeout(() => attempt(n + 1), 2000 * (n + 1));
+        if ((r.status === 429 || r.status >= 500) && n < 3) return retry(n, 'HTTP ' + r.status, 2000 * (n + 1));
         reject(new Error('HTTP ' + r.status));
       },
-      onerror: () => (n < 3 ? setTimeout(() => attempt(n + 1), 2000 * (n + 1)) : reject(new Error('network error'))),
-      ontimeout: () => (n < 3 ? attempt(n + 1) : reject(new Error('timed out')))
+      // A network error (blocked, no such host, refused) rarely clears up, so it is tried once more, not three times.
+      onerror: () => (n < 1 ? retry(n, 'network error', 2000) : reject(new Error('network error'))),
+      ontimeout: () => (n < 3 ? retry(n, 'timed out', 0) : reject(new Error('timed out')))
     });
     attempt(0);
   });

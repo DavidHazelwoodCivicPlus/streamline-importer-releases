@@ -16,9 +16,11 @@ const { buildPageContent, linkedPageKeys } = require('./lib/content');
 
 class StopRequested extends Error { constructor() { super('Stopped by user'); this.name = 'StopRequested'; } }
 
-// ctx: { api, manifest, save(manifest), log(msg), shouldStop(), idx (links.buildLinkIndex), download(url) -> Blob }
+// ctx: { api, manifest, save(manifest), log(msg), shouldStop(), idx (links.buildLinkIndex), download(url, {onRetry}) -> Blob,
+//        status(text)? — what is happening right now, for the live line above the log (not kept in the log) }
 async function runPlan(plan, ctx) {
-  const { api, manifest: m, log } = ctx;
+  if (!ctx.status) ctx = Object.assign({}, ctx, { status: () => {} });
+  const { api, manifest: m, log, status } = ctx;
   const save = () => ctx.save(m);
   const check = () => { if (ctx.shouldStop && ctx.shouldStop()) throw new StopRequested(); };
   if (m.startedAt && m.options) {
@@ -52,10 +54,12 @@ async function runPlan(plan, ctx) {
     m.startedAt = new Date().toISOString();
     save();
   }
-  let made = 0;
+  let made = 0, n = 0;
   for (const p of plan.pages) {
     check();
+    n++;
     if (m.pages[p.key]) continue;
+    status('Creating page ' + n + ' of ' + plan.pages.length + ': ' + p.title);
     const page = await api.createPage({ title: p.title, unpublished: p.unpublished, layoutId: m.layout.id });
     man.recordPage(m, p.key, { streamlineId: page.id, slug: page.slug, title: p.title, nid: p.nid, sourceType: p.sourceType, unpublished: p.unpublished, stage: 'created' });
     save();
@@ -86,9 +90,12 @@ async function runPlan(plan, ctx) {
     save();
   }
   made = 0;
+  let mi = 0;
   for (const x of plan.menu) {
     check();
+    mi++;
     if (m.menuItems[x.key]) continue;
+    status('Creating menu item ' + mi + ' of ' + plan.menu.length + ': ' + x.title);
     const page = m.pages[x.pageKey];
     if (!page) throw new Error('Menu item "' + x.title + '" has no page in the manifest');
     let parentId = null;
@@ -126,11 +133,13 @@ async function runPlan(plan, ctx) {
 
   // ---- promote ----
   phase('promote drafts');
-  made = 0;
+  made = 0; n = 0;
   for (const p of plan.pages) {
     check();
+    n++;
     const rec = m.pages[p.key];
     if (man.pageStageAtLeast(rec, 'promoted')) continue;
+    status('Promoting page ' + n + ' of ' + plan.pages.length + ': ' + p.title);
     const r = await api.promoteDraft(rec.streamlineId);
     man.setPageStage(m, p.key, 'promoted', { promoteResult: r });
     save();
@@ -141,16 +150,21 @@ async function runPlan(plan, ctx) {
 }
 
 async function uploadMediaPhase(media, ctx, check, save) {
-  const { api, manifest: m, log, idx } = ctx;
+  const { api, manifest: m, log, idx, status } = ctx;
   if (!ctx.download) throw new Error('Media upload needs a downloader (GM_xmlhttpRequest in the userscript)');
-  let made = 0, failed = 0;
+  let made = 0, failed = 0, n = 0;
+  log('  ' + media.length + ' in the plan');
   for (const mid of media) {
     check();
+    n++;
     if (m.media[mid]) continue;
     const src = idx.media.get(mid);
     if (!src || !src.url || (src.kind !== 'image' && src.kind !== 'file')) continue;
+    const name = src.fileName || src.url;
+    const what = 'media ' + n + ' of ' + media.length + ': ' + name;
+    status('Downloading ' + what);
     let blob;
-    try { blob = await ctx.download(src.url); }
+    try { blob = await ctx.download(src.url, { onRetry: (tries, why) => status('Downloading ' + what + ' (' + why + ', trying again)') }); }
     catch (e) {
       // A source file that cannot be fetched is reported, not fatal: links to it stay on the old site.
       failed++;
@@ -159,6 +173,7 @@ async function uploadMediaPhase(media, ctx, check, save) {
       save();
       continue;
     }
+    status('Uploading ' + what);
     const up = await api.uploadMedia({ kind: src.kind, basename: src.fileName || src.url.split('/').pop() || ('media-' + mid), blob, altText: src.alt });
     man.recordMedia(m, mid, { kind: up.kind, streamlineId: up.id, url: up.url, altText: up.altText || '', name: src.name, fileName: src.fileName });
     if (m.mediaFailures && m.mediaFailures[mid]) delete m.mediaFailures[mid];
@@ -183,11 +198,13 @@ async function contentPhase(plan, ctx, check, save) {
     },
     media: mid => (m.media[mid] ? { url: m.media[mid].url, id: m.media[mid].streamlineId, altText: m.media[mid].altText } : null)
   };
-  let written = 0, empty = 0, accordions = 0;
+  let written = 0, empty = 0, accordions = 0, n = 0;
   for (const p of plan.pages) {
     check();
+    n++;
     const rec = m.pages[p.key];
     if (p.content !== 'content' || man.pageStageAtLeast(rec, 'content')) continue;
+    ctx.status('Writing content, page ' + n + ' of ' + plan.pages.length + ': ' + p.title);
     const c = buildPageContent(p, idx, lookups, opts);
     if (c.empty && !c.faqs.length) { man.setPageStage(m, p.key, 'content', { contentEmpty: true }); save(); empty++; continue; }
 
@@ -242,6 +259,7 @@ async function cardsPhase(plan, ctx, check, save) {
     const rec = m.pages[p.key];
     if (!rec || rec.cardsComplete) continue;
     check();
+    ctx.status('Adding link cards: ' + p.title);
     let cols = null;
     const colId = async type => {
       cols = cols || await api.draftColumns(rec.streamlineId);
@@ -286,7 +304,9 @@ async function resolvePageUrls(plan, ctx, save) {
   const { api, manifest: m, log, idx } = ctx;
   if (plan.options.pageUrlPattern !== 'auto') { log('  page addresses: ' + plan.options.pageUrlPattern + ' (from Options)'); return; }
   const keys = [...linkedPageKeys(plan, idx, { includeAttachments: plan.options.includeAttachments })].filter(k => m.pages[k] && !m.pages[k].url);
-  for (const k of keys) {
+  for (let i = 0; i < keys.length; i++) {
+    const k = keys[i];
+    ctx.status('Looking up page addresses: ' + (i + 1) + ' of ' + keys.length);
     man.recordPage(m, k, { url: await api.pageUrl(m.pages[k].streamlineId) });
     save();
   }

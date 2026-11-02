@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Drupal 10 to Streamline Importer
 // @namespace    civicplus.streamline.d10importer
-// @version      0.7.0
+// @version      0.8.0
 // @description  Create Streamline pages and the primary menu from a Drupal 10 export (www-*.json). Runs only on the Streamline sites you turn it on for (Tampermonkey menu).
 // @match        https://*/*
 // @resource     xlsx https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js
@@ -17,7 +17,7 @@
 // @updateURL    https://raw.githubusercontent.com/DavidHazelwoodCivicPlus/streamline-importer-releases/main/dist/streamline-importer.meta.js
 // @downloadURL  https://raw.githubusercontent.com/DavidHazelwoodCivicPlus/streamline-importer-releases/main/dist/streamline-importer.user.js
 // ==/UserScript==
-// Built 2026-10-30T17:29:30.003Z. Do not edit; edit src/ and run "npm run build".
+// Built 2026-11-02T19:05:52.716Z. Do not edit; edit src/ and run "npm run build".
 
 (function () {
   'use strict';
@@ -2380,18 +2380,22 @@ const { makeDockItem } = require('./ui/dock');
 
 /* global GM_xmlhttpRequest, GM_getResourceText */
 // Old-site files are on another domain, so they are fetched with GM_xmlhttpRequest (@connect in the header).
-function download(url) {
+// opts.onRetry(tries, why) is told before each retry, so the progress screen can say it is still trying.
+function download(url, opts) {
   if (typeof GM_xmlhttpRequest !== 'function') return Promise.reject(new Error('GM_xmlhttpRequest is not available (check the script\'s @grant)'));
+  const onRetry = (opts && opts.onRetry) || (() => {});
   return new Promise((resolve, reject) => {
+    const retry = (n, why, wait) => { onRetry(n + 1, why); setTimeout(() => attempt(n + 1), wait); };
     const attempt = n => GM_xmlhttpRequest({
       method: 'GET', url, responseType: 'blob', timeout: 120000,
       onload: r => {
         if (r.status >= 200 && r.status < 300 && r.response) return resolve(r.response);
-        if ((r.status === 429 || r.status >= 500) && n < 3) return setTimeout(() => attempt(n + 1), 2000 * (n + 1));
+        if ((r.status === 429 || r.status >= 500) && n < 3) return retry(n, 'HTTP ' + r.status, 2000 * (n + 1));
         reject(new Error('HTTP ' + r.status));
       },
-      onerror: () => (n < 3 ? setTimeout(() => attempt(n + 1), 2000 * (n + 1)) : reject(new Error('network error'))),
-      ontimeout: () => (n < 3 ? attempt(n + 1) : reject(new Error('timed out')))
+      // A network error (blocked, no such host, refused) rarely clears up, so it is tried once more, not three times.
+      onerror: () => (n < 1 ? retry(n, 'network error', 2000) : reject(new Error('network error'))),
+      ontimeout: () => (n < 3 ? retry(n, 'timed out', 0) : reject(new Error('timed out')))
     });
     attempt(0);
   });
@@ -2532,9 +2536,11 @@ const { buildPageContent, linkedPageKeys } = require('./lib/content');
 
 class StopRequested extends Error { constructor() { super('Stopped by user'); this.name = 'StopRequested'; } }
 
-// ctx: { api, manifest, save(manifest), log(msg), shouldStop(), idx (links.buildLinkIndex), download(url) -> Blob }
+// ctx: { api, manifest, save(manifest), log(msg), shouldStop(), idx (links.buildLinkIndex), download(url, {onRetry}) -> Blob,
+//        status(text)? — what is happening right now, for the live line above the log (not kept in the log) }
 async function runPlan(plan, ctx) {
-  const { api, manifest: m, log } = ctx;
+  if (!ctx.status) ctx = Object.assign({}, ctx, { status: () => {} });
+  const { api, manifest: m, log, status } = ctx;
   const save = () => ctx.save(m);
   const check = () => { if (ctx.shouldStop && ctx.shouldStop()) throw new StopRequested(); };
   if (m.startedAt && m.options) {
@@ -2568,10 +2574,12 @@ async function runPlan(plan, ctx) {
     m.startedAt = new Date().toISOString();
     save();
   }
-  let made = 0;
+  let made = 0, n = 0;
   for (const p of plan.pages) {
     check();
+    n++;
     if (m.pages[p.key]) continue;
+    status('Creating page ' + n + ' of ' + plan.pages.length + ': ' + p.title);
     const page = await api.createPage({ title: p.title, unpublished: p.unpublished, layoutId: m.layout.id });
     man.recordPage(m, p.key, { streamlineId: page.id, slug: page.slug, title: p.title, nid: p.nid, sourceType: p.sourceType, unpublished: p.unpublished, stage: 'created' });
     save();
@@ -2602,9 +2610,12 @@ async function runPlan(plan, ctx) {
     save();
   }
   made = 0;
+  let mi = 0;
   for (const x of plan.menu) {
     check();
+    mi++;
     if (m.menuItems[x.key]) continue;
+    status('Creating menu item ' + mi + ' of ' + plan.menu.length + ': ' + x.title);
     const page = m.pages[x.pageKey];
     if (!page) throw new Error('Menu item "' + x.title + '" has no page in the manifest');
     let parentId = null;
@@ -2642,11 +2653,13 @@ async function runPlan(plan, ctx) {
 
   // ---- promote ----
   phase('promote drafts');
-  made = 0;
+  made = 0; n = 0;
   for (const p of plan.pages) {
     check();
+    n++;
     const rec = m.pages[p.key];
     if (man.pageStageAtLeast(rec, 'promoted')) continue;
+    status('Promoting page ' + n + ' of ' + plan.pages.length + ': ' + p.title);
     const r = await api.promoteDraft(rec.streamlineId);
     man.setPageStage(m, p.key, 'promoted', { promoteResult: r });
     save();
@@ -2657,16 +2670,21 @@ async function runPlan(plan, ctx) {
 }
 
 async function uploadMediaPhase(media, ctx, check, save) {
-  const { api, manifest: m, log, idx } = ctx;
+  const { api, manifest: m, log, idx, status } = ctx;
   if (!ctx.download) throw new Error('Media upload needs a downloader (GM_xmlhttpRequest in the userscript)');
-  let made = 0, failed = 0;
+  let made = 0, failed = 0, n = 0;
+  log('  ' + media.length + ' in the plan');
   for (const mid of media) {
     check();
+    n++;
     if (m.media[mid]) continue;
     const src = idx.media.get(mid);
     if (!src || !src.url || (src.kind !== 'image' && src.kind !== 'file')) continue;
+    const name = src.fileName || src.url;
+    const what = 'media ' + n + ' of ' + media.length + ': ' + name;
+    status('Downloading ' + what);
     let blob;
-    try { blob = await ctx.download(src.url); }
+    try { blob = await ctx.download(src.url, { onRetry: (tries, why) => status('Downloading ' + what + ' (' + why + ', trying again)') }); }
     catch (e) {
       // A source file that cannot be fetched is reported, not fatal: links to it stay on the old site.
       failed++;
@@ -2675,6 +2693,7 @@ async function uploadMediaPhase(media, ctx, check, save) {
       save();
       continue;
     }
+    status('Uploading ' + what);
     const up = await api.uploadMedia({ kind: src.kind, basename: src.fileName || src.url.split('/').pop() || ('media-' + mid), blob, altText: src.alt });
     man.recordMedia(m, mid, { kind: up.kind, streamlineId: up.id, url: up.url, altText: up.altText || '', name: src.name, fileName: src.fileName });
     if (m.mediaFailures && m.mediaFailures[mid]) delete m.mediaFailures[mid];
@@ -2699,11 +2718,13 @@ async function contentPhase(plan, ctx, check, save) {
     },
     media: mid => (m.media[mid] ? { url: m.media[mid].url, id: m.media[mid].streamlineId, altText: m.media[mid].altText } : null)
   };
-  let written = 0, empty = 0, accordions = 0;
+  let written = 0, empty = 0, accordions = 0, n = 0;
   for (const p of plan.pages) {
     check();
+    n++;
     const rec = m.pages[p.key];
     if (p.content !== 'content' || man.pageStageAtLeast(rec, 'content')) continue;
+    ctx.status('Writing content, page ' + n + ' of ' + plan.pages.length + ': ' + p.title);
     const c = buildPageContent(p, idx, lookups, opts);
     if (c.empty && !c.faqs.length) { man.setPageStage(m, p.key, 'content', { contentEmpty: true }); save(); empty++; continue; }
 
@@ -2758,6 +2779,7 @@ async function cardsPhase(plan, ctx, check, save) {
     const rec = m.pages[p.key];
     if (!rec || rec.cardsComplete) continue;
     check();
+    ctx.status('Adding link cards: ' + p.title);
     let cols = null;
     const colId = async type => {
       cols = cols || await api.draftColumns(rec.streamlineId);
@@ -2802,7 +2824,9 @@ async function resolvePageUrls(plan, ctx, save) {
   const { api, manifest: m, log, idx } = ctx;
   if (plan.options.pageUrlPattern !== 'auto') { log('  page addresses: ' + plan.options.pageUrlPattern + ' (from Options)'); return; }
   const keys = [...linkedPageKeys(plan, idx, { includeAttachments: plan.options.includeAttachments })].filter(k => m.pages[k] && !m.pages[k].url);
-  for (const k of keys) {
+  for (let i = 0; i < keys.length; i++) {
+    const k = keys[i];
+    ctx.status('Looking up page addresses: ' + (i + 1) + ' of ' + keys.length);
     man.recordPage(m, k, { url: await api.pageUrl(m.pages[k].streamlineId) });
     save();
   }
@@ -3597,9 +3621,29 @@ function openPanel() {
   function viewProgress(kind, wipeOpts) {
     clear();
     title(kind === 'run' ? 'Running' : kind === 'undo' ? 'Undoing' : kind === 'wipe' ? 'Erasing ' + location.host : 'Removing all primary items');
+    // Live line above the log: what is happening now, the time since the run started and since anything last
+    // happened, and a spinner that turns once a second, so a slow step still shows the importer is working.
+    const live = h('div', '', 'margin:0 0 8px;padding:8px 10px;border-radius:4px;background:#eef4fb;color:#123;font:600 13px/1.4 sans-serif;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;');
+    panel.appendChild(live);
     const logBox = box('font:13px/1.5 monospace;white-space:pre-wrap;max-height:360px;overflow:auto;');
     panel.appendChild(logBox);
-    const log = msg => { logBox.textContent += msg + '\n'; logBox.scrollTop = logBox.scrollHeight; console.log('[Importer] ' + msg); };
+    const SPIN = ['◐', '◓', '◑', '◒'];
+    const t0 = Date.now();
+    let now = 'Starting…', lastChange = t0, spin = 0;
+    const clock = ms => { const s = Math.floor(ms / 1000); return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0'); };
+    const drawLive = () => {
+      const quiet = Math.floor((Date.now() - lastChange) / 1000);
+      live.textContent = SPIN[spin++ % SPIN.length] + ' ' + now + ' · ' + clock(Date.now() - t0) + ' elapsed' + (quiet >= 10 ? ' · still working (' + quiet + 's on this step)' : '');
+      live.title = now;
+    };
+    const status = text => { now = text; lastChange = Date.now(); drawLive(); };
+    const ticker = setInterval(drawLive, 1000);
+    drawLive();
+    const log = msg => {
+      logBox.textContent += msg + '\n'; logBox.scrollTop = logBox.scrollHeight; console.log('[Importer] ' + msg);
+      if (/^Phase /.test(msg)) status(msg);
+      else lastChange = Date.now();
+    };
     let stop = false;
     const stopBtn = btn('Stop after the current step', () => { stop = true; stopBtn.disabled = true; log('Stopping…'); });
     panel.appendChild(stopBtn);
@@ -3609,6 +3653,9 @@ function openPanel() {
     const a = api(log);
     const save = m => { storeManifest(m); };
     const done = ok => {
+      clearInterval(ticker);
+      live.textContent = (ok ? '✓ Finished' : '■ Stopped') + ' · ' + clock(Date.now() - t0);
+      live.style.background = ok ? '#e7f6ea' : '#fdecec';
       stopBtn.remove();
       foot.style.display = 'block';
       foot.appendChild(h('p', ok ? 'Done. Refresh the CMS to see the changes.' : 'Stopped. Nothing is lost: resume or undo from "Resume, undo, other actions".', 'margin:0 0 6px;font-weight:600;'));
@@ -3634,7 +3681,7 @@ function openPanel() {
         state.manifest = man.newManifest({ host: location.host, source: { label: state.sourceLabel, counts: state.exp.counts, siteMap: state.siteMap ? state.siteMap.fileName : null } });
       }
       log('Source: ' + state.sourceLabel + (state.siteMap && state.options.menuSource === 'workbook' ? ' + ' + state.siteMap.fileName : '') + ' · run ' + state.manifest.runId);
-      runPlan(state.plan, { api: a, manifest: state.manifest, save, log, shouldStop: () => stop, idx: state.idx, download: platform.download })
+      runPlan(state.plan, { api: a, manifest: state.manifest, save, log, status, shouldStop: () => stop, idx: state.idx, download: platform.download })
         .then(s => {
           const fails = Object.keys(state.manifest.mediaFailures || {}).length, dup = (state.manifest.possibleDuplicates || []).length;
           log('✓ Finished: ' + s.pages + ' pages, ' + s.menuItems + ' menu items, ' + s.media + ' media' + (fails ? ' (' + fails + ' media could not be downloaded; see the manifest)' : '') + (dup ? ' · ' + dup + ' possible duplicate page(s) flagged above' : ''));
@@ -3771,5 +3818,5 @@ module.exports = { openPanel, setPlatform };
     });
     return module.exports;
   }
-  load('main').start("0.7.0");
+  load('main').start("0.8.0");
 })();

@@ -519,9 +519,29 @@ function openPanel() {
   function viewProgress(kind, wipeOpts) {
     clear();
     title(kind === 'run' ? 'Running' : kind === 'undo' ? 'Undoing' : kind === 'wipe' ? 'Erasing ' + location.host : 'Removing all primary items');
+    // Live line above the log: what is happening now, the time since the run started and since anything last
+    // happened, and a spinner that turns once a second, so a slow step still shows the importer is working.
+    const live = h('div', '', 'margin:0 0 8px;padding:8px 10px;border-radius:4px;background:#eef4fb;color:#123;font:600 13px/1.4 sans-serif;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;');
+    panel.appendChild(live);
     const logBox = box('font:13px/1.5 monospace;white-space:pre-wrap;max-height:360px;overflow:auto;');
     panel.appendChild(logBox);
-    const log = msg => { logBox.textContent += msg + '\n'; logBox.scrollTop = logBox.scrollHeight; console.log('[Importer] ' + msg); };
+    const SPIN = ['◐', '◓', '◑', '◒'];
+    const t0 = Date.now();
+    let now = 'Starting…', lastChange = t0, spin = 0;
+    const clock = ms => { const s = Math.floor(ms / 1000); return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0'); };
+    const drawLive = () => {
+      const quiet = Math.floor((Date.now() - lastChange) / 1000);
+      live.textContent = SPIN[spin++ % SPIN.length] + ' ' + now + ' · ' + clock(Date.now() - t0) + ' elapsed' + (quiet >= 10 ? ' · still working (' + quiet + 's on this step)' : '');
+      live.title = now;
+    };
+    const status = text => { now = text; lastChange = Date.now(); drawLive(); };
+    const ticker = setInterval(drawLive, 1000);
+    drawLive();
+    const log = msg => {
+      logBox.textContent += msg + '\n'; logBox.scrollTop = logBox.scrollHeight; console.log('[Importer] ' + msg);
+      if (/^Phase /.test(msg)) status(msg);
+      else lastChange = Date.now();
+    };
     let stop = false;
     const stopBtn = btn('Stop after the current step', () => { stop = true; stopBtn.disabled = true; log('Stopping…'); });
     panel.appendChild(stopBtn);
@@ -531,6 +551,9 @@ function openPanel() {
     const a = api(log);
     const save = m => { storeManifest(m); };
     const done = ok => {
+      clearInterval(ticker);
+      live.textContent = (ok ? '✓ Finished' : '■ Stopped') + ' · ' + clock(Date.now() - t0);
+      live.style.background = ok ? '#e7f6ea' : '#fdecec';
       stopBtn.remove();
       foot.style.display = 'block';
       foot.appendChild(h('p', ok ? 'Done. Refresh the CMS to see the changes.' : 'Stopped. Nothing is lost: resume or undo from "Resume, undo, other actions".', 'margin:0 0 6px;font-weight:600;'));
@@ -556,7 +579,7 @@ function openPanel() {
         state.manifest = man.newManifest({ host: location.host, source: { label: state.sourceLabel, counts: state.exp.counts, siteMap: state.siteMap ? state.siteMap.fileName : null } });
       }
       log('Source: ' + state.sourceLabel + (state.siteMap && state.options.menuSource === 'workbook' ? ' + ' + state.siteMap.fileName : '') + ' · run ' + state.manifest.runId);
-      runPlan(state.plan, { api: a, manifest: state.manifest, save, log, shouldStop: () => stop, idx: state.idx, download: platform.download })
+      runPlan(state.plan, { api: a, manifest: state.manifest, save, log, status, shouldStop: () => stop, idx: state.idx, download: platform.download })
         .then(s => {
           const fails = Object.keys(state.manifest.mediaFailures || {}).length, dup = (state.manifest.possibleDuplicates || []).length;
           log('✓ Finished: ' + s.pages + ' pages, ' + s.menuItems + ' menu items, ' + s.media + ' media' + (fails ? ' (' + fails + ' media could not be downloaded; see the manifest)' : '') + (dup ? ' · ' + dup + ' possible duplicate page(s) flagged above' : ''));
