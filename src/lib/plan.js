@@ -3,8 +3,9 @@
 // and the dry-run report. Pure: the same input always gives the same plan, so resume can match work
 // to the manifest by key.
 
-const { referencedMedia } = require('./links');
+const { referencedMedia, keyFor } = require('./links');
 const { MODULES, moduleEntries } = require('./modules');
+const { sectionBlocks, primaryMediaHtml } = require('./sections');
 
 const DEFAULT_OPTIONS = Object.freeze({
   menuSource: 'd10',            // 'd10' | 'workbook'
@@ -13,7 +14,8 @@ const DEFAULT_OPTIONS = Object.freeze({
   newsEvents: 'skip',           // news and events never become menu pages (news can be imported as a module)
   includeEmptyMicrosites: false,
   includeAttachments: true,     // content mode: list a page's file attachments under a "Documents" heading
-  faqAccordions: true,          // content mode: a page's D10 FAQ sections become one accordion per question in the main column
+  includeSections: true,        // content mode: text, image + text, files and slideshow sections, and the primary image
+  faqAccordions: true,          // content mode, FAQs module off: a page's D10 FAQ sections become one accordion per question
   uploadMedia: true,            // upload the files and images pages link to, and point links at them
   pageUrlPattern: 'auto',       // page addresses for links between pages: 'auto' = each page's url from the CMS, or a pattern like /{slug}
   unmatchedRows: 'empty-page',  // workbook mode: rows with no D10 match become 'empty-page' | 'skip'
@@ -25,7 +27,7 @@ const DEFAULT_OPTIONS = Object.freeze({
 });
 
 // Options that must stay the same for the whole of a run (resume rebuilds the same plan).
-const RUN_LOCKED = ['menuSource', 'pageContent', 'unpublishedSourceAs', 'includeAttachments', 'uploadMedia', 'unmatchedRows', 'faqAccordions',
+const RUN_LOCKED = ['menuSource', 'pageContent', 'unpublishedSourceAs', 'includeAttachments', 'includeSections', 'uploadMedia', 'unmatchedRows', 'faqAccordions',
   'embeddedPageCards', 'modules', 'moduleMenu', 'timeZone'];
 const sameOption = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 
@@ -37,11 +39,12 @@ function normalizeOptions(o) {
   if (opts.newsEvents !== 'skip') throw new Error('News and events can only be skipped for now');
   if (opts.pageUrlPattern !== 'auto' && !/\{slug\}/.test(opts.pageUrlPattern)) throw new Error('Page URL pattern must contain {slug}, e.g. /{slug}');
   opts.limit = Math.max(0, parseInt(opts.limit, 10) || 0);
-  for (const k of ['includeEmptyMicrosites', 'includeAttachments', 'uploadMedia', 'faqAccordions', 'embeddedPageCards', 'moduleMenu']) opts[k] = !!opts[k];
+  for (const k of ['includeEmptyMicrosites', 'includeAttachments', 'includeSections', 'uploadMedia', 'faqAccordions', 'embeddedPageCards', 'moduleMenu']) opts[k] = !!opts[k];
   opts.modules = [...new Set(opts.modules || [])];
   for (const t of opts.modules) if (!MODULES[t]) throw new Error('Unknown module type "' + t + '"');
   opts.modules.sort((a, b) => Object.keys(MODULES).indexOf(a) - Object.keys(MODULES).indexOf(b));
-  if (opts.pageContent === 'empty') opts.faqAccordions = false;
+  // With the FAQs module, FAQ sections link to the FAQ pages from the right column instead.
+  if (opts.pageContent === 'empty' || opts.modules.includes('faqs')) opts.faqAccordions = false;
   // Module entries always get their content, so uploads stay possible in empty mode when modules are chosen.
   if (opts.pageContent === 'empty' && !opts.modules.length) opts.uploadMedia = false;
   return opts;
@@ -59,10 +62,17 @@ function normalizeOptions(o) {
 function buildPlan(tree, options, idx, exp) {
   const opts = normalizeOptions(options);
   const pages = [], menu = [], seen = new Set(), media = [], cardIssues = [];
+  const mediaSet = new Set();
   const addMedia = page => {
     if (!opts.uploadMedia || !idx || page.content !== 'content') return;
-    const html = page.bodyHtml + page.faqs.map(q => q.answerHtml).join('');
-    for (const mid of referencedMedia(idx, html, page.attachments)) if (!media.includes(mid)) media.push(mid);
+    const html = page.bodyHtml + page.faqs.map(q => q.answerHtml).join('') + page.blocks.map(b => b.html).join('');
+    for (const mid of referencedMedia(idx, html, page.attachments)) if (!mediaSet.has(mid)) { mediaSet.add(mid); media.push(mid); }
+  };
+  // Body (with the primary image on top) and section blocks of a D10 page or record.
+  const contentOf = src => {
+    const sec = opts.includeSections && idx ? sectionBlocks(src.sections, idx) : { blocks: [], warnings: [] };
+    const top = opts.includeSections && idx ? primaryMediaHtml(idx, src.primaryMediaId) : '';
+    return { bodyHtml: top + (src.bodyHtml || ''), blocks: sec.blocks, sectionWarnings: sec.warnings, sources: src };
   };
 
   const walk = (nodes, parentMenuKey, path) => {
@@ -72,13 +82,15 @@ function buildPlan(tree, options, idx, exp) {
         seen.add(n.key);
         const published = src ? src.published : true;
         const withContent = opts.pageContent === 'content' && !!src;
+        const c = withContent ? contentOf(src) : null;
         const page = {
           key: n.key, title: n.title, sourceType: n.sourceType, nid: src ? src.nid : '', alias: src ? src.alias : '',
           sourcePublished: published, unpublished: !published && opts.unpublishedSourceAs === 'unpublished',
-          content: withContent ? 'content' : 'empty', hasBody: !!(src && src.hasBody), notes: (src && src.notes) || [],
-          bodyHtml: withContent ? src.bodyHtml : '', attachments: withContent && opts.includeAttachments ? (src.attachments || []) : [],
+          content: withContent ? 'content' : 'empty', hasBody: !!(src && (src.hasBody || (c && c.blocks.length))), notes: (src && src.notes) || [],
+          bodyHtml: c ? c.bodyHtml : '', attachments: withContent && opts.includeAttachments ? (src.attachments || []) : [],
+          blocks: c ? c.blocks : [], sectionWarnings: c ? c.sectionWarnings : [],
           faqs: withContent && opts.faqAccordions ? faqsFor(src, idx) : [],
-          cards: [], embedded: (opts.embeddedPageCards && src && src.embeddedPages) || [],
+          cards: [], embedded: (opts.embeddedPageCards && src && src.embeddedPages) || [], src: src || null,
           row: n.row || null
         };
         pages.push(page);
@@ -93,25 +105,30 @@ function buildPlan(tree, options, idx, exp) {
 
   // Modules: a listing page per type (cards for every entry) and a page per entry.
   let topWeight = tree.length;
+  const entriesByType = {};
   for (const type of opts.modules) {
     if (!exp) throw new Error('Module import needs the export');
     const def = MODULES[type];
     const all = moduleEntries(exp, type, { timeZone: opts.timeZone || 'UTC' });
     const entries = opts.limit ? all.slice(0, opts.limit) : all; // a test run takes the first few of each module
+    entriesByType[type] = entries;
+    if (!entries.length) continue; // nothing of this type in the export: no empty listing page
     const listKey = 'list:' + type;
     pages.push({
       key: listKey, title: def.label, sourceType: 'listing', nid: '', alias: '', sourcePublished: true, unpublished: false,
-      content: 'empty', hasBody: false, notes: [], bodyHtml: '', attachments: [], faqs: [], embedded: [], row: null, moduleType: type,
+      content: 'empty', hasBody: false, notes: [], bodyHtml: '', attachments: [], faqs: [], blocks: [], sectionWarnings: [], embedded: [], src: null, row: null, moduleType: type,
       // Always manual: with any other order the CMS does not show the cards added to the section (sandbox,
       // 2026-10-29). The entries are already in the module's order (A-Z, news newest first).
       cards: entries.length ? [{ column: 'main', title: '', keys: entries.map(e => e.key), orderBy: 'manual', perPage: 12 }] : []
     });
     if (opts.moduleMenu) menu.push({ key: 'menu:' + listKey, pageKey: listKey, parentKey: null, weight: topWeight++, title: def.label, level: 1, path: '', row: null });
     for (const e of entries) {
+      const c = contentOf(e);
       const page = {
         key: e.key, title: e.title, sourceType: type, nid: e.nid, alias: e.alias, sourcePublished: e.published,
-        unpublished: !e.published && opts.unpublishedSourceAs === 'unpublished', content: 'content', hasBody: !!e.bodyHtml.trim(),
-        notes: e.notes, bodyHtml: e.bodyHtml, attachments: opts.includeAttachments ? e.attachments : [], faqs: [], cards: [], embedded: [],
+        unpublished: !e.published && opts.unpublishedSourceAs === 'unpublished', content: 'content', hasBody: !!(c.bodyHtml.trim() || c.blocks.length),
+        notes: e.notes, bodyHtml: c.bodyHtml, attachments: opts.includeAttachments ? e.attachments : [], blocks: c.blocks, sectionWarnings: c.sectionWarnings,
+        faqs: opts.faqAccordions ? faqsFor(e, idx) : [], cards: [], embedded: (opts.embeddedPageCards && e.embeddedPages) || [], src: e,
         row: null, moduleType: type, listKey, publishedAt: e.publishedAt
       };
       pages.push(page);
@@ -119,23 +136,60 @@ function buildPlan(tree, options, idx, exp) {
     }
   }
 
-  // Right-column cards from D10 "embedded pages" sections, now that every page key is known.
+  // Right-column cards, now that every page key is known: D10 "embedded pages", staff and FAQ sections,
+  // and a microsite's meetings and events.
   const keys = new Set(pages.map(p => p.key));
-  const keyOf = nid => { const n = idx && idx.nodes.get(nid); return !n ? null : (n.kind === 'news' ? 'news:' : n.sourceType + ':') + nid; };
+  const issue = (p, header, nid, title, reason) => cardIssues.push({ page: p.title, nid: p.nid, section: header, target: nid, targetTitle: title, reason });
+  const gutter = (p, title, found, perPage) => { if (found.length) p.cards.push({ column: 'gutter', title, keys: found, orderBy: 'manual', perPage: perPage || Math.max(found.length, 3) }); };
+  const people = entriesByType.people || [];
   for (const p of pages) {
     for (const sec of p.embedded) {
       const found = [];
       for (const nid of sec.nids) {
-        const k = keyOf(nid);
+        const k = idx ? keyFor(idx, nid) : null;
         if (k && keys.has(k)) { if (!found.includes(k)) found.push(k); continue; }
         const n = idx && idx.nodes.get(nid);
-        cardIssues.push({ page: p.title, nid: p.nid, section: sec.header, target: nid, targetTitle: n ? n.title : '',
-          reason: !n ? 'not in the export' : n.kind === 'news' || MODULES[n.kind] ? n.kind + ' item; select that module to import it' : 'that page is not imported' });
+        issue(p, sec.header, nid, n ? n.title : '', !n ? 'not in the export' : n.kind === 'news' || n.kind === 'event' || MODULES[n.kind] ? n.kind + ' item; select that module to import it' : 'that page is not imported');
       }
-      if (!sec.nids.length) cardIssues.push({ page: p.title, nid: p.nid, section: sec.header, target: '', targetTitle: '', reason: 'section lists no pages' });
-      if (found.length) p.cards.push({ column: 'gutter', title: sec.header, keys: found, orderBy: 'manual', perPage: Math.max(found.length, 3) });
+      if (!sec.nids.length) issue(p, sec.header, '', '', 'section lists no pages');
+      gutter(p, sec.header, found);
     }
     delete p.embedded;
+    const src = p.src;
+    delete p.src;
+    if (!src || p.content !== 'content') continue;
+
+    // Staff sections: the people listed, a department's people, or a custom group's people.
+    for (const s of (src.sections || []).filter(x => x.bundle === 'embedded_directory_listings')) {
+      const header = s.header || 'Contacts';
+      if (!opts.modules.includes('people')) { issue(p, header, '', '', 'staff section; select Staff Directory to import it'); continue; }
+      let list;
+      if (s.groupTermId) list = people.filter(e => e.groupTermIds.includes(s.groupTermId));
+      else if (s.departmentId && !s.peopleIds.length) list = people.filter(e => e.micrositeIds.includes(s.departmentId)).sort((a, b) => a.weight - b.weight);
+      else list = s.peopleIds.map(id => people.find(e => e.nid === id)).filter(Boolean);
+      const found = list.map(e => e.key).filter(k => keys.has(k));
+      if (!found.length) issue(p, header, '', '', 'staff section lists nobody that is imported');
+      gutter(p, header, found);
+    }
+    // FAQ sections, when FAQs are pages: cards to the FAQs of that category.
+    if (opts.modules.includes('faqs')) {
+      for (const sec of src.faqSections || []) {
+        const inCat = ((idx && idx.faqCategories.get(sec.categoryId)) || []).map(f => 'faqs:' + f.nid).filter(k => keys.has(k));
+        if (!inCat.length) issue(p, sec.header || 'FAQs', '', '', 'FAQ section shows no imported FAQs');
+        gutter(p, sec.header || 'FAQs', inCat);
+      }
+    }
+    // What else belongs to a microsite (D10 og_audience): its staff and FAQs not already carded above, and its
+    // meetings and events (newest first), in pages of 5.
+    if (p.sourceType === 'microsite') {
+      const carded = new Set(p.cards.flatMap(c => c.keys));
+      for (const [type, title] of [['people', 'Staff'], ['faqs', 'FAQs'], ['meetings', 'Meetings'], ['events', 'Events']]) {
+        let list = (entriesByType[type] || []).filter(e => e.micrositeIds.includes(p.nid) && !carded.has(e.key));
+        if (type === 'people') list = list.slice().sort((a, b) => a.weight - b.weight);
+        const found = list.map(e => e.key);
+        gutter(p, title, found, Math.min(found.length, 5) || 3);
+      }
+    }
   }
   return { options: opts, pages, menu, media, cardIssues };
 }

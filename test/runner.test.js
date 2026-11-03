@@ -180,7 +180,7 @@ test('FAQ sections become one accordion per published question, in D10 order, li
   const secs = [...api.sections.values()].filter(s => api.pages.get(s.pageId).title === 'Billing').sort((a, b) => a.weight - b.weight);
   assert.deepEqual(secs.map(s => [s.weight, s.prefs.accordion, s.prefs.accordionTitle]), [[1, true, 'When is it due?'], [2, true, 'How do I pay?']]);
   assert.match(secs[1].html, /<a href="\/water">water<\/a>/);
-  assert.equal(m.pages['page:2'].faqs, 2);
+  assert.equal(m.pages['page:2'].sections, 2);
 });
 
 test('FAQ accordions can be turned off', async () => {

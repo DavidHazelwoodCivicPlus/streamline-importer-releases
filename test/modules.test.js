@@ -68,7 +68,7 @@ test('plan: listing page with cards, entry pages, menu item; embedded pages beco
 
 test('options: module types are checked and kept in a fixed order', () => {
   assert.deepEqual(normalizeOptions({ modules: ['parks', 'news', 'parks'] }).modules, ['news', 'parks']);
-  assert.throws(() => normalizeOptions({ modules: ['meetings'] }), /Unknown module type/);
+  assert.throws(() => normalizeOptions({ modules: ['calendars'] }), /Unknown module type/);
 });
 
 // Minimal in-memory CMS for the cards phase.
@@ -128,7 +128,7 @@ test('Harvard: modules and right-column cards plan cleanly', { skip: !harvard },
   const counts = Object.fromEntries(types.map(t => [t, p.pages.filter(x => x.moduleType === t && x.sourceType !== 'listing').length]));
   assert.deepEqual(counts, { news: 70, jobs: 59, bids_rfps: 38, ordinances: 36, parks: 11, projects: 9, standard_locations: 16 });
   const cardPages = p.pages.filter(x => x.cards.some(c => c.column === 'gutter'));
-  assert.equal(cardPages.length, 29, 'pages with right-column cards');
+  assert.equal(cardPages.length, 31, 'pages with right-column cards (29, plus 2 news items with their own embedded-pages section)');
   assert.equal(new Set(p.pages.map(x => x.key)).size, p.pages.length);
 });
 

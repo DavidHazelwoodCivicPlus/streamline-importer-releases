@@ -102,7 +102,8 @@ const state = {
   exp: null, idx: null, sourceLabel: '',
   siteMap: null, overrides: null, overridesLabel: '',
   nav: null, match: null, plan: null, preview: null,
-  options: Object.assign({}, DEFAULT_OPTIONS, { unmatchedRows: 'empty-page' }),
+  // Everything the export has is imported unless unticked: content, and every module type.
+  options: Object.assign({}, DEFAULT_OPTIONS, { unmatchedRows: 'empty-page', pageContent: 'content', modules: MODULE_TYPES.slice() }),
   manifest: null, errors: []
 };
 let platform = {};
@@ -321,8 +322,12 @@ function openPanel() {
         body.appendChild(checkbox('List each page\'s file attachments under a "Documents" heading', o.includeAttachments, v => { o.includeAttachments = v; }));
         body.appendChild(checkbox('Upload the files and images pages link to, and point the links at them', o.uploadMedia, v => { o.uploadMedia = v; }));
         body.appendChild(note('Off: links to files keep pointing at the old site. Downloads come from the old site, so Tampermonkey asks once to allow it.'));
-        body.appendChild(checkbox('Turn D10 FAQ sections into accordions (one per question, in the main column)', o.faqAccordions, v => { o.faqAccordions = v; }));
-        body.appendChild(note('Streamline only allows link cards in the right column, so FAQs go under the page body.'));
+        body.appendChild(checkbox('Import D10 page sections: text, image + text, files and slideshows, and each page\'s primary image', o.includeSections, v => { o.includeSections = v; }));
+        body.appendChild(note('Each section becomes a section under the body, in D10 order. Sections D10 showed collapsed become accordions.'));
+        if (!o.modules.includes('faqs')) {
+          body.appendChild(checkbox('Turn D10 FAQ sections into accordions (one per question, in the main column)', o.faqAccordions, v => { o.faqAccordions = v; }));
+          body.appendChild(note('Only when the FAQs module below is off. With it on, each FAQ is its own page, linked from the right column of the pages that show it.'));
+        }
         const row = h('label', '', 'display:block;margin:8px 0;');
         row.appendChild(document.createTextNode('Page URL pattern: '));
         const pat = document.createElement('input'); pat.type = 'text'; pat.value = o.pageUrlPattern === 'auto' ? '' : o.pageUrlPattern; pat.placeholder = 'auto (each page\'s address from the CMS)'; pat.style.cssText = 'width:280px;';
@@ -337,11 +342,11 @@ function openPanel() {
       body.appendChild(note('Square cards (Teasers, card layout), titled with the section heading. Cards only link to pages this run imports.'));
 
       body.appendChild(heading('Module content'));
-      body.appendChild(hint('Each entry becomes a page (details, body and attachments), listed as cards on a listing page per module. Meetings, events and people are not imported yet.'));
+      body.appendChild(hint('Each entry becomes a page (details, body, sections and attachments), listed as cards on a listing page per module. Meetings, events, staff and FAQs have no Streamline module yet, so they are pages too, linked from the right column of the pages D10 showed them on: staff and FAQ sections, and a microsite\'s meetings and events.'));
       const counts = moduleCounts(state.exp);
       for (const t of MODULE_TYPES) {
         const n = counts[t] || 0;
-        body.appendChild(checkbox(MODULES[t].label + ' (' + n + ')', o.modules.includes(t), v => { o.modules = v ? o.modules.concat(t) : o.modules.filter(x => x !== t); }, !n));
+        body.appendChild(checkbox(MODULES[t].label + ' (' + n + ')', o.modules.includes(t), v => { o.modules = v ? o.modules.concat(t) : o.modules.filter(x => x !== t); if (t === 'faqs') draw(); }, !n));
       }
       body.appendChild(checkbox('Add each module listing page to the primary menu', o.moduleMenu, v => { o.moduleMenu = v; }));
       const tzRow = h('label', '', 'display:block;margin:8px 0;');
@@ -394,14 +399,21 @@ function openPanel() {
       'Will create ' + p.pages.length + ' pages and ' + p.menu.length + ' primary menu items (' + tops + ' at the top level).',
       'Pages imported as unpublished: ' + p.pages.filter(x => x.unpublished).length + '.',
       o.pageContent === 'content'
-        ? 'Content: ' + [...pv.byKey.values()].filter(c => !c.empty).length + ' pages get their D10 body' + (o.includeAttachments ? ' and attachments' : '') + '; ' + (p.pages.length - [...pv.byKey.values()].filter(c => !c.empty || c.faqs.length).length) + ' stay empty (no body in D10).'
+        ? 'Content: ' + [...pv.byKey.values()].filter(c => !c.empty).length + ' pages get their D10 body' + (o.includeAttachments ? ' and attachments' : '') + '; ' + (p.pages.length - [...pv.byKey.values()].filter(c => !c.empty || c.blocks.length).length) + ' stay empty (no content in D10).'
         : 'All pages are empty (title only).'
     ];
     const lists = p.pages.filter(x => x.sourceType === 'listing');
     if (lists.length) lines.push('Modules: ' + lists.map(l => l.title + ' (' + (l.cards[0] ? l.cards[0].keys.length : 0) + ')').join(', ') + '. Each entry is a page, listed as cards on its listing page' + (o.moduleMenu ? ', which gets a menu item' : '') + '.');
     const cardPages = p.pages.filter(x => x.cards.some(c => c.column === 'gutter'));
     if (cardPages.length) lines.push('Right-column cards: ' + cardPages.reduce((s, x) => s + x.cards.filter(c => c.column === 'gutter').reduce((t, c) => t + c.keys.length, 0), 0) + ' on ' + cardPages.length + ' page(s).');
-    if (p.cardIssues.length) lines.push('Embedded-page links that cannot become cards: ' + p.cardIssues.length + ' (see the card report).');
+    if (p.cardIssues.length) lines.push('Right-column links that cannot become cards: ' + p.cardIssues.length + ' (see the card report).');
+    const secPages = p.pages.filter(x => x.blocks && x.blocks.length);
+    if (secPages.length) {
+      const kinds = {};
+      for (const x of secPages) for (const b of x.blocks) kinds[b.kind] = (kinds[b.kind] || 0) + 1;
+      const NAMES = { text: 'text', image_text: 'image + text', files: 'files', slideshow: 'slideshow' };
+      lines.push('D10 sections (main column, after the body): ' + Object.entries(kinds).map(([k, n]) => n + ' ' + (NAMES[k] || k)).join(', ') + ' on ' + secPages.length + ' page(s). Sections D10 showed collapsed become accordions.');
+    }
     const faqPages = p.pages.filter(x => x.faqs && x.faqs.length);
     if (faqPages.length) lines.push('FAQ accordions: ' + faqPages.reduce((s, x) => s + x.faqs.length, 0) + ' on ' + faqPages.length + ' page(s): ' + faqPages.slice(0, 5).map(x => x.title + ' (' + x.faqs.length + ')').join(', ') + (faqPages.length > 5 ? ', …' : '') + '.');
     const missingAtt = pv.warnings.filter(w => /attachment-missing/.test(w)).length;
@@ -436,15 +448,15 @@ function openPanel() {
     if (pv.byKey.size) {
       panel.appendChild(heading('Content preview'));
       const sel = document.createElement('select'); sel.style.cssText = 'max-width:100%;';
-      const withBody = p.pages.filter(x => pv.byKey.has(x.key) && (!pv.byKey.get(x.key).empty || pv.byKey.get(x.key).faqs.length));
-      for (const x of withBody) { const op = document.createElement('option'); op.value = x.key; op.textContent = x.title + ' (nid ' + x.nid + ')' + (x.faqs.length ? ' · ' + x.faqs.length + ' FAQs' : ''); sel.appendChild(op); }
+      const withBody = p.pages.filter(x => pv.byKey.has(x.key) && (!pv.byKey.get(x.key).empty || pv.byKey.get(x.key).blocks.length));
+      for (const x of withBody) { const op = document.createElement('option'); op.value = x.key; const nb = pv.byKey.get(x.key).blocks.length; op.textContent = x.title + ' (nid ' + x.nid + ')' + (nb ? ' · ' + nb + ' section(s)' : ''); sel.appendChild(op); }
       const view = h('div', null, 'border:1px solid #ddd;border-radius:4px;padding:10px 14px;margin-top:6px;max-height:300px;overflow:auto;font-size:14px;line-height:1.5;');
       // The html is generated by the converter from escaped text, so it is safe to show here.
-      // FAQs show as <details> so they open and close the way the accordions will.
+      // Accordions show as <details> so they open and close the way they will on the page.
       const qEsc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;');
       const show = () => {
         const c = pv.byKey.get(sel.value);
-        view.innerHTML = !c ? '' : (c.empty ? '' : c.html) + c.faqs.map(f => '<details style="border:1px solid #2760b0;border-radius:4px;margin:8px 0;padding:6px 10px;"><summary style="cursor:pointer;font-weight:600;color:#2760b0;">' + qEsc(f.question) + '</summary>' + f.html + '</details>').join('');
+        view.innerHTML = !c ? '' : (c.empty ? '' : c.html) + c.blocks.map(b => b.accordion ? '<details style="border:1px solid #2760b0;border-radius:4px;margin:8px 0;padding:6px 10px;"><summary style="cursor:pointer;font-weight:600;color:#2760b0;">' + qEsc(b.title) + '</summary>' + b.html + '</details>' : '<div style="border-top:1px dashed #bbb;margin-top:8px;padding-top:4px;">' + b.html + '</div>').join('');
       };
       sel.onchange = show;
       panel.appendChild(sel); panel.appendChild(view);

@@ -145,6 +145,7 @@ function sectionsOf(rec, paragraphById) {
 function faqSectionsOf(rec, paragraphById) {
   return sectionsOf(rec, paragraphById).filter(s => s.bundle === 'faqs' && s.rec).map(s => ({
     pid: s.pid,
+    header: cleanTitle(firstValue(s.rec, 'field_embed_header') || ''),
     categoryId: firstValue(s.rec, 'field_faq_category') != null ? String(firstValue(s.rec, 'field_faq_category')) : '',
     collapsing: String(firstValue(s.rec, 'field_collapsing_options') || '')
   })).filter(s => s.categoryId);
@@ -159,6 +160,36 @@ function embeddedPagesOf(rec, paragraphById) {
     nids: fieldItems(s.rec, 'field_embed_individual').map(it => it && (it.target_id != null ? it.target_id : it.entity_id)).filter(v => v != null).map(String),
     embedType: String(firstValue(s.rec, 'field_embed_type') || '')
   }));
+}
+
+const refIds = (rec, name) => fieldItems(rec, name).map(it => it && (typeof it === 'object' ? (it.target_id != null ? it.target_id : it.entity_id) : it)).filter(v => v != null && v !== '').map(String);
+
+// A page's content sections, in D10 order, as plain data (see lib/sections.js for how each becomes Streamline
+// content). Embedded pages and FAQ sections are read by embeddedPagesOf / faqSectionsOf instead.
+//   { pid, bundle, header, headerType, collapsing: 'none'|'open'|'collapsed', html, imageId, imagePosition,
+//     imageLink: {url, title}, mediaIds, display, peopleIds, departmentId, groupTermId }
+function contentSectionsOf(rec, paragraphById) {
+  return sectionsOf(rec, paragraphById).filter(s => s.rec && !['embedded_pages', 'faqs'].includes(s.bundle)).map(s => {
+    const r = s.rec;
+    const link = fieldItems(r, 'field_image_link')[0];
+    return {
+      pid: s.pid, bundle: s.bundle,
+      header: cleanTitle(firstValue(r, 'field_embed_header') || ''),
+      headerType: String(firstValue(r, 'field_header_type') || 'h2'),
+      collapsing: String(firstValue(r, 'field_collapsing_options') || 'none'),
+      html: String(firstValue(r, 'field_text') || ''),
+      imageId: refIds(r, 'field_image')[0] || '',
+      imagePosition: String(firstValue(r, 'field_position') || firstValue(r, 'field_slideshow_position') || ''),
+      imageLink: link && typeof link === 'object' && link.uri ? { url: String(link.uri), title: cleanTitle(link.title || '') } : null,
+      mediaIds: s.bundle === 'slideshow' ? refIds(r, 'field_images') : s.bundle === 'files' ? refIds(r, 'field_files') : [],
+      fileSource: String(firstValue(r, 'field_file_source') || ''),
+      display: String(firstValue(r, 'field_display') || ''),
+      peopleIds: refIds(r, 'field_contact_info_individual'),
+      departmentId: refIds(r, 'field_contact_info_department')[0] || '',
+      groupTermId: refIds(r, 'field_contact_info_custom_group')[0] || '',
+      embedType: String(firstValue(r, 'field_embed_type') || '')
+    };
+  });
 }
 
 function summarizeFaq(rec) {
@@ -234,17 +265,22 @@ function loadExport(files) {
   const paragraphById = new Map((raw.paragraphs || []).filter(p => p && p.entity_id != null).map(p => [String(p.entity_id), p]));
   const rawByNid = new Map([...(raw.pages || []), ...(raw.microsites || [])].filter(r => r && r.fields).map(r => [String(r.entity_id), r]));
   for (const s of pages.concat(microsites)) {
-    s.faqSections = faqSectionsOf(rawByNid.get(s.nid), paragraphById);
-    s.embeddedPages = embeddedPagesOf(rawByNid.get(s.nid), paragraphById);
+    const rec = rawByNid.get(s.nid);
+    s.faqSections = faqSectionsOf(rec, paragraphById);
+    s.embeddedPages = embeddedPagesOf(rec, paragraphById);
+    s.sections = contentSectionsOf(rec, paragraphById);
+    s.primaryMediaId = refIds(rec, 'field_primary_image_video')[0] || '';
+    s.imagePlacement = String(firstValue(rec, 'field_image_placement') || '');
   }
   const faqs = (raw.faqs || []).filter(r => r && r.fields).map(summarizeFaq);
   const faqCategories = faqsByCategory(faqs);
 
-  return { pages, microsites, media, faqs, faqCategories, terms, hosts, origin, counts, errors, warnings, raw };
+  return { pages, microsites, media, faqs, faqCategories, terms, hosts, origin, counts, errors, warnings, raw, paragraphById };
 }
 
 module.exports = {
   KNOWN_FILES, REQUIRED_FILES, fieldItems, firstValue, hasValue, cleanTitle, classifyPage,
   summarizePage, summarizeMicrosite, summarizeMedia, summarizeFaq, faqsByCategory, sectionsOf, faqSectionsOf, embeddedPagesOf,
+  contentSectionsOf, refIds,
   oldSiteHosts, exportKey, loadExport
 };

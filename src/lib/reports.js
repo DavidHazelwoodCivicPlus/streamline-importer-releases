@@ -3,8 +3,8 @@
 
 const { fieldItems, firstValue, cleanTitle } = require('./d10');
 
-// One row per FAQ group (microsite + category): the D10 pages whose FAQ sections show it (they get accordions
-// in content mode), the microsite it belongs to, and its questions in weight order.
+// One row per FAQ group (microsite + category): the D10 pages whose FAQ sections show it (they link to the FAQ
+// pages, or get accordions when FAQs are not pages), the microsite it belongs to, and its questions in weight order.
 function faqReport(exp) {
   const faqs = exp.raw.faqs || [];
   const ms = new Map(exp.microsites.map(m => [m.nid, m]));
@@ -40,7 +40,7 @@ function faqReport(exp) {
 
 const FAQ_COLUMNS = [
   { key: 'microsite', label: 'Microsite' }, { key: 'micrositeNid', label: 'Microsite nid' }, { key: 'wouldGoOn', label: 'Would go on' },
-  { key: 'category', label: 'FAQ category' }, { key: 'onPages', label: 'Shown on D10 pages (become accordions)' }, { key: 'count', label: 'FAQs' }, { key: 'published', label: 'Published' },
+  { key: 'category', label: 'FAQ category' }, { key: 'onPages', label: 'Shown on D10 pages' }, { key: 'count', label: 'FAQs' }, { key: 'published', label: 'Published' },
   { key: 'questions', label: 'Questions (in weight order)' }, { key: 'nids', label: 'FAQ nids' }, { key: 'oldUrls', label: 'Old URLs' }
 ];
 
@@ -52,9 +52,9 @@ function outOfScopeReport(exp) {
     rows.push({ type, records: recs.length, published: recs.filter(r => r && r.is_published === true).length, note });
   };
   const r = exp.raw;
-  count('FAQs', r.faqs, 'Imported as accordions on the pages whose FAQ sections show them (content mode). FAQs no page shows are not imported; see the FAQ report.');
-  count('Meetings', r.meetings, 'Not imported yet (waiting for a Streamline meetings update).');
-  count('Directory listings', r.directory_listings, 'People: not imported yet (waiting for a Streamline update).');
+  count('FAQs', r.faqs, 'With FAQs selected: one page per FAQ, linked from the right column of the pages whose FAQ sections show it and of its microsite. Without: accordions on the pages whose FAQ sections show them.');
+  count('Meetings', r.meetings, 'With Meetings selected: one page per meeting (date, location, agendas, packets, minutes, video links), linked from its microsite (right column).');
+  count('Directory listings', r.directory_listings, 'With Staff Directory selected: one page per person, linked from the right column of the pages whose staff sections list them, and of their microsite.');
   count('Business directory', r.business_directory, 'Imported as pages when Business Directory is selected under Module content.');
   count('Parks', r.parks, 'Imported as pages when Parks is selected under Module content.');
   count('Bids and RFPs', r.bids_rfps, 'Imported as pages when Bids & RFPs is selected under Module content.');
@@ -63,20 +63,20 @@ function outOfScopeReport(exp) {
   count('Projects', r.projects, 'Imported as pages when Projects is selected under Module content.');
   count('Property listings', r.property_listings, 'Not imported (no module yet; none in the sample exports).');
   count('Locations', r.standard_locations, 'Imported as pages when Locations is selected under Module content.');
-  count('Paragraphs', r.paragraphs, 'Section content used by pages and microsites (field_sections). Not imported.');
+  count('Paragraphs', r.paragraphs, 'Section content of pages and microsites (field_sections): text, image + text, files and slideshows are imported under the body; embedded pages, staff and FAQ sections become right-column cards. Homepage widgets (cards, tabs, social media, custom text) are not imported.');
   const news = exp.pages.filter(p => p.kind === 'news'), events = exp.pages.filter(p => p.kind === 'event');
   rows.push({ type: 'News items', records: news.length, published: news.filter(p => p.published).length, note: 'Imported as dated pages when News is selected under Module content; never menu pages.' });
-  rows.push({ type: 'Events', records: events.length, published: events.filter(p => p.published).length, note: 'Not imported yet (waiting for a Streamline events update).' });
+  rows.push({ type: 'Events', records: events.length, published: events.filter(p => p.published).length, note: 'With Events selected: one page per event (dates, location), linked from its microsite (right column).' });
   const regular = exp.pages.filter(p => p.kind === 'page');
   const has = re => regular.filter(p => p.notes.some(n => re.test(n)));
   const pr = (type, list, note) => rows.push({ type, records: list.length, published: list.filter(p => p.published).length, note });
-  pr('Pages with sections', has(/sections/i), 'Their field_sections (paragraph) content is not imported; only the body is.');
+  pr('Pages with sections', has(/sections/i), 'Imported with the body when Import D10 page sections is on (see Paragraphs).');
   pr('Pages that redirect', has(/^Redirect/), 'Imported as ordinary pages. Streamline has redirect pages (redirect/redirectUrl) for a later version.');
-  pr('Pages with a primary image or video', has(/primary image/i), 'The primary image is not imported.');
+  pr('Pages with a primary image or video', has(/primary image/i), 'Shown at the top of the page when Import D10 page sections is on. A video is a link.');
   const layout = (r.microsites || []).filter(m => m && m.fields && Array.isArray(m.fields.layout_builder__layout) && m.fields.layout_builder__layout.length);
   rows.push({ type: 'Microsites with Layout Builder content', records: layout.length, published: layout.filter(m => m.is_published).length, note: 'Layout Builder content is not imported; only the microsite body is.' });
   const msSections = exp.microsites.filter(m => m.notes.length);
-  rows.push({ type: 'Microsites with sections', records: msSections.length, published: msSections.filter(m => m.published).length, note: 'Their field_sections content is not imported.' });
+  rows.push({ type: 'Microsites with sections', records: msSections.length, published: msSections.filter(m => m.published).length, note: 'Imported like page sections.' });
   const videos = (exp.media || []).filter(m => m.kind === 'video');
   rows.push({ type: 'Video media', records: videos.length, published: videos.filter(m => m.published).length, note: 'Links to videos are kept as external links; videos are not uploaded.' });
   return rows;

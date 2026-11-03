@@ -184,6 +184,9 @@ async function uploadMediaPhase(media, ctx, check, save) {
   log('  ' + made + ' uploaded, ' + failed + ' could not be downloaded, ' + (media.length - made - failed) + ' already done or skipped');
 }
 
+// Section ids of a page's blocks after the body (manifests from before 0.9 called them faqSectionIds).
+const blockSectionIds = rec => (rec && (rec.blockSectionIds || rec.faqSectionIds)) || [];
+
 async function contentPhase(plan, ctx, check, save) {
   const { api, manifest: m, log, idx } = ctx;
   const opts = { includeAttachments: plan.options.includeAttachments };
@@ -206,7 +209,7 @@ async function contentPhase(plan, ctx, check, save) {
     if (p.content !== 'content' || man.pageStageAtLeast(rec, 'content')) continue;
     ctx.status('Writing content, page ' + n + ' of ' + plan.pages.length + ': ' + p.title);
     const c = buildPageContent(p, idx, lookups, opts);
-    if (c.empty && !c.faqs.length) { man.setPageStage(m, p.key, 'content', { contentEmpty: true }); save(); empty++; continue; }
+    if (c.empty && !c.blocks.length) { man.setPageStage(m, p.key, 'content', { contentEmpty: true }); save(); empty++; continue; }
 
     // The main column, looked up once per page and only when a section still has to be added.
     let mainId = null;
@@ -218,8 +221,8 @@ async function contentPhase(plan, ctx, check, save) {
       return (mainId = col.id);
     };
 
-    // Body first (weight 1), then one accordion per FAQ, in D10 order. Each section id is saved as soon as it
-    // exists, so a resume fills in the same sections instead of adding new ones.
+    // Body first (weight 1), then the D10 sections and FAQ accordions, in order. Each section id is saved as soon
+    // as it exists, so a resume fills in the same sections instead of adding new ones.
     if (!c.empty) {
       if (!rec.sectionId) {
         man.setPageStage(m, p.key, 'section', { sectionId: await api.addSection(rec.streamlineId, 'Freeform', await main(), 1) });
@@ -227,26 +230,25 @@ async function contentPhase(plan, ctx, check, save) {
       }
       await api.setFreeform(m.pages[p.key].sectionId, c.html, c.json);
     }
-    const faqIds = (m.pages[p.key].faqSectionIds || []).slice();
-    for (let i = 0; i < c.faqs.length; i++) {
+    const ids = blockSectionIds(m.pages[p.key]).slice();
+    for (let i = 0; i < c.blocks.length; i++) {
       check();
-      const q = c.faqs[i];
-      if (!faqIds[i]) {
-        faqIds[i] = await api.addSection(rec.streamlineId, 'Freeform', await main(), (c.empty ? 1 : 2) + i);
-        man.recordPage(m, p.key, { faqSectionIds: faqIds.slice() });
+      const b = c.blocks[i];
+      if (!ids[i]) {
+        ids[i] = await api.addSection(rec.streamlineId, 'Freeform', await main(), (c.empty ? 1 : 2) + i);
+        man.recordPage(m, p.key, { blockSectionIds: ids.slice() });
         save();
       }
-      await api.setFreeform(faqIds[i], q.html, q.json);
-      await api.setFreeformPreferences(faqIds[i], { accordion: true, accordionTitle: q.question });
-      accordions++;
+      await api.setFreeform(ids[i], b.html, b.json);
+      if (b.accordion) { await api.setFreeformPreferences(ids[i], { accordion: true, accordionTitle: b.title }); accordions++; }
     }
     const oldSite = c.links.filter(l => l.outcome === 'old-site').length;
-    man.setPageStage(m, p.key, 'content', { contentWarnings: c.warnings.length, linksToOldSite: oldSite, faqs: c.faqs.length });
+    man.setPageStage(m, p.key, 'content', { contentWarnings: c.warnings.length, linksToOldSite: oldSite, sections: c.blocks.length });
     save();
     written++;
     if (written % 25 === 0) log('  … ' + written + ' pages written');
   }
-  log('  ' + written + ' written' + (accordions ? ' (' + accordions + ' FAQ accordions)' : '') + ', ' + empty + ' had no body');
+  log('  ' + written + ' written' + (accordions ? ' (' + accordions + ' accordions)' : '') + ', ' + empty + ' had no content');
 }
 
 // Teasers sections of link cards. Each section's id, and whether its cards were added, are saved as soon as they
@@ -268,7 +270,7 @@ async function cardsPhase(plan, ctx, check, save) {
       return c.id;
     };
     // Main-column cards go after the body and FAQ sections; right-column cards are the only sections there.
-    const mainBase = 1 + (m.pages[p.key].sectionId ? 1 : 0) + ((m.pages[p.key].faqSectionIds || []).length);
+    const mainBase = 1 + (m.pages[p.key].sectionId ? 1 : 0) + blockSectionIds(m.pages[p.key]).length;
     const ids = (m.pages[p.key].cardSectionIds || []).slice(), done = (m.pages[p.key].cardsDone || []).slice();
     let gutterIndex = 0, mainIndex = 0;
     for (let i = 0; i < p.cards.length; i++) {

@@ -21,7 +21,7 @@ function buildLinkIndex(exp) {
   // Module records (jobs, bids, parks…) are nodes too; when they are imported, links to them go to their page.
   const { MODULES } = require('./modules');
   for (const [type, def] of Object.entries(MODULES)) {
-    if (type === 'news') continue; // news items are page records, already above
+    if (def.file === 'pages') continue; // news items and events are page records, already above
     for (const r of (exp.raw && exp.raw[def.file]) || []) {
       if (!r || r.entity_id == null || !r.fields) continue;
       const nid = String(r.entity_id), t = r.fields.title && r.fields.title[0] && r.fields.title[0].value;
@@ -43,7 +43,8 @@ function buildLinkIndex(exp) {
 }
 
 // The plan key of the page a node becomes: page:N, microsite:N, news:N, jobs:N, …
-const keyFor = (idx, nid) => { const n = idx.nodes.get(nid); return !n ? null : (n.kind === 'news' ? 'news:' : n.sourceType + ':') + nid; };
+// News items and events are page records but become news:N / events:N pages.
+const keyFor = (idx, nid) => { const n = idx.nodes.get(nid); return !n ? null : (n.kind === 'news' ? 'news:' : n.kind === 'event' ? 'events:' : n.sourceType + ':') + nid; };
 
 // Classifies an href without resolving it. Returns { type, nid?, mid?, path?, url } where type is
 // 'node' | 'media' | 'file' | 'alias' | 'internal' | 'external' | 'special'.
@@ -121,7 +122,17 @@ function makeResolver(idx, lookups, report) {
     const r = mediaTarget(c);
     return { kind: 'link', url: r.url, external: r.external, text: m ? (m.name || m.fileName) : 'Document' };
   }
-  return { resolveLink, resolveEmbed };
+  // A plain <img> whose src is an old-site image that was uploaded: shown from Streamline. Otherwise dropped (reported).
+  function resolveImage(attrs) {
+    const c = classify(idx, attrs.src || '', {});
+    if (c.type !== 'media') return null;
+    const m = idx.media.get(c.mid);
+    const up = lookups.media ? lookups.media(c.mid) : null;
+    if (!m || m.kind !== 'image' || !up || !up.id) return null;
+    rec({ href: attrs.src, type: 'media', result: up.url, outcome: 'media', target: 'media:' + c.mid, reason: '' });
+    return { id: up.id, url: up.url, altText: attrs.alt || m.alt || up.altText || '' };
+  }
+  return { resolveLink, resolveEmbed, resolveImage };
 }
 
 // Media a page's body and attachments point at (ids that exist in www-media.json), in first-seen order.
@@ -148,4 +159,4 @@ function attachmentsHtml(idx, ids) {
   return '<h2>Documents</h2><ul>' + items.map(m => '<li><a href="/media/' + esc(m.mid) + '">' + esc(m.name || m.fileName || 'Document') + '</a></li>').join('') + '</ul>';
 }
 
-module.exports = { normPath, buildLinkIndex, classify, makeResolver, referencedMedia, attachmentsHtml };
+module.exports = { normPath, keyFor, buildLinkIndex, classify, makeResolver, referencedMedia, attachmentsHtml };

@@ -124,5 +124,5 @@ test('FAQ sections are found whether the paragraph is embedded in the page or on
     { name: 'www-microsites.json', text: JSON.stringify([microsite(10, 'U', '/u')]) },
     { name: 'www-paragraphs.json', text: JSON.stringify([para]) }
   ]);
-  assert.deepEqual(exp.pages[0].faqSections, [{ pid: '5', categoryId: '77', collapsing: '' }]);
+  assert.deepEqual(exp.pages[0].faqSections, [{ pid: '5', header: '', categoryId: '77', collapsing: '' }]);
 });

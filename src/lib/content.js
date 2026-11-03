@@ -8,10 +8,12 @@ const { makeResolver, attachmentsHtml } = require('./links');
 
 const isEmptyDoc = json => json.root.children.length === 1 && json.root.children[0].type === 'paragraph' && !json.root.children[0].children.length;
 
-// page: a plan page (bodyHtml, attachments, faqs). lookups: see links.makeResolver.
+// page: a plan page (bodyHtml, attachments, blocks, faqs). lookups: see links.makeResolver.
 // Returns { html, json, warnings, links: [{href, type, result, outcome, target, reason}], empty,
-//           faqs: [{ nid, question, html, json }] }
-// empty = the body (with its attachments) has nothing in it; the page may still have FAQs.
+//           blocks: [{ kind, title, accordion, html, json }] }
+// blocks are the main-column sections after the body, in order: the D10 sections (lib/sections.js), then
+// one accordion per FAQ (kind 'faq', title = the question).
+// empty = the body (with its attachments) has nothing in it; the page may still have blocks.
 function buildPageContent(page, idx, lookups, opts) {
   opts = opts || {};
   const links = [];
@@ -19,7 +21,7 @@ function buildPageContent(page, idx, lookups, opts) {
   const convert = html => convertHtml(html, {
     resolveLink: resolver.resolveLink,
     resolveEmbed: resolver.resolveEmbed,
-    resolveImage: () => null // bodies in the samples have no <img>; any that appear are reported
+    resolveImage: resolver.resolveImage // an <img> of an uploaded image; anything else is dropped and reported
   });
 
   const r = convert((page.bodyHtml || '') + (opts.includeAttachments !== false ? attachmentsHtml(idx, page.attachments) : ''));
@@ -27,14 +29,21 @@ function buildPageContent(page, idx, lookups, opts) {
   const warnings = r.warnings.slice();
   if (opts.includeAttachments !== false) for (const id of page.attachments || []) if (!idx.media.has(id)) warnings.push({ code: 'attachment-missing', detail: 'media ' + id + ' is not in www-media.json' });
 
-  const faqs = (page.faqs || []).map(f => {
+  for (const w of page.sectionWarnings || []) warnings.push(w);
+  const blocks = [];
+  for (const b of page.blocks || []) {
+    const a = convert(b.html || '');
+    for (const w of a.warnings) warnings.push({ code: w.code, detail: b.kind + ' section ' + b.pid + ': ' + w.detail });
+    if (!isEmptyDoc(a.json)) blocks.push({ kind: b.kind, title: b.title, accordion: b.accordion, html: a.html, json: a.json });
+  }
+  for (const f of page.faqs || []) {
     const a = convert(f.answerHtml || '');
     for (const w of a.warnings) warnings.push({ code: w.code, detail: 'FAQ "' + f.question + '": ' + w.detail });
     if (isEmptyDoc(a.json)) warnings.push({ code: 'faq-empty-answer', detail: 'FAQ "' + f.question + '" has no answer' });
-    return { nid: f.nid, question: f.question, html: a.html, json: a.json };
-  });
+    blocks.push({ kind: 'faq', title: f.question, accordion: true, html: a.html, json: a.json });
+  }
 
-  return { html: r.html, json: r.json, warnings, links, empty: isEmptyDoc(r.json), faqs };
+  return { html: r.html, json: r.json, warnings, links, empty: isEmptyDoc(r.json), blocks };
 }
 
 // Dry-run lookups: say where links would go without knowing real URLs yet.

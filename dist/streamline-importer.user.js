@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Drupal 10 to Streamline Importer
 // @namespace    civicplus.streamline.d10importer
-// @version      0.8.0
+// @version      0.9.0
 // @description  Create Streamline pages and the primary menu from a Drupal 10 export (www-*.json). Runs only on the Streamline sites you turn it on for (Tampermonkey menu).
 // @match        https://*/*
 // @resource     xlsx https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js
@@ -17,7 +17,7 @@
 // @updateURL    https://raw.githubusercontent.com/DavidHazelwoodCivicPlus/streamline-importer-releases/main/dist/streamline-importer.meta.js
 // @downloadURL  https://raw.githubusercontent.com/DavidHazelwoodCivicPlus/streamline-importer-releases/main/dist/streamline-importer.user.js
 // ==/UserScript==
-// Built 2026-11-02T19:05:52.716Z. Do not edit; edit src/ and run "npm run build".
+// Built 2026-11-03T21:40:25.585Z. Do not edit; edit src/ and run "npm run build".
 
 (function () {
   'use strict';
@@ -394,10 +394,12 @@ const { makeResolver, attachmentsHtml } = require('./links');
 
 const isEmptyDoc = json => json.root.children.length === 1 && json.root.children[0].type === 'paragraph' && !json.root.children[0].children.length;
 
-// page: a plan page (bodyHtml, attachments, faqs). lookups: see links.makeResolver.
+// page: a plan page (bodyHtml, attachments, blocks, faqs). lookups: see links.makeResolver.
 // Returns { html, json, warnings, links: [{href, type, result, outcome, target, reason}], empty,
-//           faqs: [{ nid, question, html, json }] }
-// empty = the body (with its attachments) has nothing in it; the page may still have FAQs.
+//           blocks: [{ kind, title, accordion, html, json }] }
+// blocks are the main-column sections after the body, in order: the D10 sections (lib/sections.js), then
+// one accordion per FAQ (kind 'faq', title = the question).
+// empty = the body (with its attachments) has nothing in it; the page may still have blocks.
 function buildPageContent(page, idx, lookups, opts) {
   opts = opts || {};
   const links = [];
@@ -405,7 +407,7 @@ function buildPageContent(page, idx, lookups, opts) {
   const convert = html => convertHtml(html, {
     resolveLink: resolver.resolveLink,
     resolveEmbed: resolver.resolveEmbed,
-    resolveImage: () => null // bodies in the samples have no <img>; any that appear are reported
+    resolveImage: resolver.resolveImage // an <img> of an uploaded image; anything else is dropped and reported
   });
 
   const r = convert((page.bodyHtml || '') + (opts.includeAttachments !== false ? attachmentsHtml(idx, page.attachments) : ''));
@@ -413,14 +415,21 @@ function buildPageContent(page, idx, lookups, opts) {
   const warnings = r.warnings.slice();
   if (opts.includeAttachments !== false) for (const id of page.attachments || []) if (!idx.media.has(id)) warnings.push({ code: 'attachment-missing', detail: 'media ' + id + ' is not in www-media.json' });
 
-  const faqs = (page.faqs || []).map(f => {
+  for (const w of page.sectionWarnings || []) warnings.push(w);
+  const blocks = [];
+  for (const b of page.blocks || []) {
+    const a = convert(b.html || '');
+    for (const w of a.warnings) warnings.push({ code: w.code, detail: b.kind + ' section ' + b.pid + ': ' + w.detail });
+    if (!isEmptyDoc(a.json)) blocks.push({ kind: b.kind, title: b.title, accordion: b.accordion, html: a.html, json: a.json });
+  }
+  for (const f of page.faqs || []) {
     const a = convert(f.answerHtml || '');
     for (const w of a.warnings) warnings.push({ code: w.code, detail: 'FAQ "' + f.question + '": ' + w.detail });
     if (isEmptyDoc(a.json)) warnings.push({ code: 'faq-empty-answer', detail: 'FAQ "' + f.question + '" has no answer' });
-    return { nid: f.nid, question: f.question, html: a.html, json: a.json };
-  });
+    blocks.push({ kind: 'faq', title: f.question, accordion: true, html: a.html, json: a.json });
+  }
 
-  return { html: r.html, json: r.json, warnings, links, empty: isEmptyDoc(r.json), faqs };
+  return { html: r.html, json: r.json, warnings, links, empty: isEmptyDoc(r.json), blocks };
 }
 
 // Dry-run lookups: say where links would go without knowing real URLs yet.
@@ -643,6 +652,7 @@ function sectionsOf(rec, paragraphById) {
 function faqSectionsOf(rec, paragraphById) {
   return sectionsOf(rec, paragraphById).filter(s => s.bundle === 'faqs' && s.rec).map(s => ({
     pid: s.pid,
+    header: cleanTitle(firstValue(s.rec, 'field_embed_header') || ''),
     categoryId: firstValue(s.rec, 'field_faq_category') != null ? String(firstValue(s.rec, 'field_faq_category')) : '',
     collapsing: String(firstValue(s.rec, 'field_collapsing_options') || '')
   })).filter(s => s.categoryId);
@@ -657,6 +667,36 @@ function embeddedPagesOf(rec, paragraphById) {
     nids: fieldItems(s.rec, 'field_embed_individual').map(it => it && (it.target_id != null ? it.target_id : it.entity_id)).filter(v => v != null).map(String),
     embedType: String(firstValue(s.rec, 'field_embed_type') || '')
   }));
+}
+
+const refIds = (rec, name) => fieldItems(rec, name).map(it => it && (typeof it === 'object' ? (it.target_id != null ? it.target_id : it.entity_id) : it)).filter(v => v != null && v !== '').map(String);
+
+// A page's content sections, in D10 order, as plain data (see lib/sections.js for how each becomes Streamline
+// content). Embedded pages and FAQ sections are read by embeddedPagesOf / faqSectionsOf instead.
+//   { pid, bundle, header, headerType, collapsing: 'none'|'open'|'collapsed', html, imageId, imagePosition,
+//     imageLink: {url, title}, mediaIds, display, peopleIds, departmentId, groupTermId }
+function contentSectionsOf(rec, paragraphById) {
+  return sectionsOf(rec, paragraphById).filter(s => s.rec && !['embedded_pages', 'faqs'].includes(s.bundle)).map(s => {
+    const r = s.rec;
+    const link = fieldItems(r, 'field_image_link')[0];
+    return {
+      pid: s.pid, bundle: s.bundle,
+      header: cleanTitle(firstValue(r, 'field_embed_header') || ''),
+      headerType: String(firstValue(r, 'field_header_type') || 'h2'),
+      collapsing: String(firstValue(r, 'field_collapsing_options') || 'none'),
+      html: String(firstValue(r, 'field_text') || ''),
+      imageId: refIds(r, 'field_image')[0] || '',
+      imagePosition: String(firstValue(r, 'field_position') || firstValue(r, 'field_slideshow_position') || ''),
+      imageLink: link && typeof link === 'object' && link.uri ? { url: String(link.uri), title: cleanTitle(link.title || '') } : null,
+      mediaIds: s.bundle === 'slideshow' ? refIds(r, 'field_images') : s.bundle === 'files' ? refIds(r, 'field_files') : [],
+      fileSource: String(firstValue(r, 'field_file_source') || ''),
+      display: String(firstValue(r, 'field_display') || ''),
+      peopleIds: refIds(r, 'field_contact_info_individual'),
+      departmentId: refIds(r, 'field_contact_info_department')[0] || '',
+      groupTermId: refIds(r, 'field_contact_info_custom_group')[0] || '',
+      embedType: String(firstValue(r, 'field_embed_type') || '')
+    };
+  });
 }
 
 function summarizeFaq(rec) {
@@ -732,18 +772,23 @@ function loadExport(files) {
   const paragraphById = new Map((raw.paragraphs || []).filter(p => p && p.entity_id != null).map(p => [String(p.entity_id), p]));
   const rawByNid = new Map([...(raw.pages || []), ...(raw.microsites || [])].filter(r => r && r.fields).map(r => [String(r.entity_id), r]));
   for (const s of pages.concat(microsites)) {
-    s.faqSections = faqSectionsOf(rawByNid.get(s.nid), paragraphById);
-    s.embeddedPages = embeddedPagesOf(rawByNid.get(s.nid), paragraphById);
+    const rec = rawByNid.get(s.nid);
+    s.faqSections = faqSectionsOf(rec, paragraphById);
+    s.embeddedPages = embeddedPagesOf(rec, paragraphById);
+    s.sections = contentSectionsOf(rec, paragraphById);
+    s.primaryMediaId = refIds(rec, 'field_primary_image_video')[0] || '';
+    s.imagePlacement = String(firstValue(rec, 'field_image_placement') || '');
   }
   const faqs = (raw.faqs || []).filter(r => r && r.fields).map(summarizeFaq);
   const faqCategories = faqsByCategory(faqs);
 
-  return { pages, microsites, media, faqs, faqCategories, terms, hosts, origin, counts, errors, warnings, raw };
+  return { pages, microsites, media, faqs, faqCategories, terms, hosts, origin, counts, errors, warnings, raw, paragraphById };
 }
 
 module.exports = {
   KNOWN_FILES, REQUIRED_FILES, fieldItems, firstValue, hasValue, cleanTitle, classifyPage,
   summarizePage, summarizeMicrosite, summarizeMedia, summarizeFaq, faqsByCategory, sectionsOf, faqSectionsOf, embeddedPagesOf,
+  contentSectionsOf, refIds,
   oldSiteHosts, exportKey, loadExport
 };
 
@@ -1254,7 +1299,7 @@ function buildLinkIndex(exp) {
   // Module records (jobs, bids, parks…) are nodes too; when they are imported, links to them go to their page.
   const { MODULES } = require('./modules');
   for (const [type, def] of Object.entries(MODULES)) {
-    if (type === 'news') continue; // news items are page records, already above
+    if (def.file === 'pages') continue; // news items and events are page records, already above
     for (const r of (exp.raw && exp.raw[def.file]) || []) {
       if (!r || r.entity_id == null || !r.fields) continue;
       const nid = String(r.entity_id), t = r.fields.title && r.fields.title[0] && r.fields.title[0].value;
@@ -1276,7 +1321,8 @@ function buildLinkIndex(exp) {
 }
 
 // The plan key of the page a node becomes: page:N, microsite:N, news:N, jobs:N, …
-const keyFor = (idx, nid) => { const n = idx.nodes.get(nid); return !n ? null : (n.kind === 'news' ? 'news:' : n.sourceType + ':') + nid; };
+// News items and events are page records but become news:N / events:N pages.
+const keyFor = (idx, nid) => { const n = idx.nodes.get(nid); return !n ? null : (n.kind === 'news' ? 'news:' : n.kind === 'event' ? 'events:' : n.sourceType + ':') + nid; };
 
 // Classifies an href without resolving it. Returns { type, nid?, mid?, path?, url } where type is
 // 'node' | 'media' | 'file' | 'alias' | 'internal' | 'external' | 'special'.
@@ -1354,7 +1400,17 @@ function makeResolver(idx, lookups, report) {
     const r = mediaTarget(c);
     return { kind: 'link', url: r.url, external: r.external, text: m ? (m.name || m.fileName) : 'Document' };
   }
-  return { resolveLink, resolveEmbed };
+  // A plain <img> whose src is an old-site image that was uploaded: shown from Streamline. Otherwise dropped (reported).
+  function resolveImage(attrs) {
+    const c = classify(idx, attrs.src || '', {});
+    if (c.type !== 'media') return null;
+    const m = idx.media.get(c.mid);
+    const up = lookups.media ? lookups.media(c.mid) : null;
+    if (!m || m.kind !== 'image' || !up || !up.id) return null;
+    rec({ href: attrs.src, type: 'media', result: up.url, outcome: 'media', target: 'media:' + c.mid, reason: '' });
+    return { id: up.id, url: up.url, altText: attrs.alt || m.alt || up.altText || '' };
+  }
+  return { resolveLink, resolveEmbed, resolveImage };
 }
 
 // Media a page's body and attachments point at (ids that exist in www-media.json), in first-seen order.
@@ -1381,7 +1437,7 @@ function attachmentsHtml(idx, ids) {
   return '<h2>Documents</h2><ul>' + items.map(m => '<li><a href="/media/' + esc(m.mid) + '">' + esc(m.name || m.fileName || 'Document') + '</a></li>').join('') + '</ul>';
 }
 
-module.exports = { normPath, buildLinkIndex, classify, makeResolver, referencedMedia, attachmentsHtml };
+module.exports = { normPath, keyFor, buildLinkIndex, classify, makeResolver, referencedMedia, attachmentsHtml };
 
   },
   "lib/manifest": function (module, exports, require) {
@@ -1612,10 +1668,12 @@ module.exports = { normalizeTitle, parseCsv, parseOverrides, matchSiteMap, MATCH
 'use strict';
 // D10 module content (records that are not pages) imported as Streamline pages: one page per entry, built
 // from its fields, plus one listing page per module that shows its entries as cards.
-// Meetings, events and people (directory listings) are left out on purpose: Streamline is adding modules for them.
+// Meetings, events, people (directory listings) and FAQs have no Streamline module that pages can use yet, so they
+// are pages too, linked from the right column of the pages D10 showed them on (see lib/plan.js).
 // Pure: takes the loaded export, returns entry summaries.
 
-const { fieldItems, firstValue, cleanTitle } = require('./d10');
+const { fieldItems, firstValue, cleanTitle, refIds, contentSectionsOf, embeddedPagesOf } = require('./d10');
+const { mediaHtml, fileListHtml } = require('./sections');
 
 const esc = s => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
@@ -1623,6 +1681,7 @@ const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 
 // D10 stores date-times in UTC ("2018-07-23T15:00:00"); they are shown in the site's time zone,
 // e.g. "July 23, 2018 10:00 AM" in America/Chicago. Date-only values ("2023-07-01") are shown as written.
 function formatDate(s, timeZone) {
+  if (isUnix(s)) return formatDate(new Date(Number(s) * 1000).toISOString(), timeZone); // smart dates: Unix seconds
   const m = /^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2}))?/.exec(String(s || ''));
   if (!m) return String(s || '');
   if (!m[4]) return MONTHS[Number(m[2]) - 1] + ' ' + Number(m[3]) + ', ' + m[1];
@@ -1631,7 +1690,8 @@ function formatDate(s, timeZone) {
     .formatToParts(d).map(p => [p.type, p.value]));
   return parts.month + ' ' + parts.day + ', ' + parts.year + ' ' + parts.hour + ':' + parts.minute + ' ' + parts.dayPeriod;
 }
-const isoDate = s => { const m = /^(\d{4}-\d{2}-\d{2})/.exec(String(s || '')); return m ? m[1] : ''; };
+const isUnix = s => /^\d{9,11}$/.test(String(s == null ? '' : s).trim());
+const isoDate = s => { if (isUnix(s)) return new Date(Number(s) * 1000).toISOString().slice(0, 10); const m = /^(\d{4}-\d{2}-\d{2})/.exec(String(s || '')); return m ? m[1] : ''; };
 
 // A D10 address field as lines of text.
 function addressLines(rec, name) {
@@ -1649,8 +1709,46 @@ const detail = (label, value) => (value ? '<p><strong>' + esc(label) + ':</stron
 const richDetail = (label, html) => (html && html.trim() ? '<h3>' + esc(label) + '</h3>' + html : '');
 const addressHtml = lines => (lines.length ? '<p><strong>Address:</strong><br>' + lines.map(esc).join('<br>') + '</p>' : '');
 
+// "January 3, 2024 6:00 PM – 8:00 PM", from a smart date item ({value, end_value} in Unix seconds).
+function smartDateText(item, tz) {
+  if (!item || typeof item !== 'object' || !item.value) return '';
+  const a = formatDate(String(item.value), tz);
+  const b = item.end_value && String(item.end_value) !== String(item.value) ? formatDate(String(item.end_value), tz) : '';
+  if (!b) return a;
+  const day = x => x.replace(/ \d+:\d\d [AP]M$/, '');
+  return day(a) === day(b) ? a + ' – ' + b.slice(day(b).length + 1) : a + ' – ' + b;
+}
+function datesHtml(rec, tz) {
+  const items = fieldItems(rec, 'field_smart_date').filter(it => it && typeof it === 'object' && it.value);
+  if (!items.length) return '';
+  const more = items.slice(1, 25).map(it => esc(smartDateText(it, tz)));
+  return detail('When', smartDateText(items[0], tz)) +
+    (more.length ? '<p>Also on: ' + more.join('; ') + (items.length > 25 ? '; and ' + (items.length - 25) + ' more dates' : '') + '</p>' : '');
+}
+// First date, for sorting (newest first).
+const sortDate = rec => { const it = fieldItems(rec, 'field_smart_date').find(x => x && x.value); return it ? isoDate(String(it.value)) : ''; };
+
+// D10 link fields ({uri, title}) as a list.
+function linkListHtml(rec, names) {
+  const items = [];
+  for (const n of names) for (const it of fieldItems(rec, n)) if (it && typeof it === 'object' && it.uri) items.push('<li><a href="' + esc(it.uri) + '">' + esc(cleanTitle(it.title) || it.uri) + '</a></li>');
+  return items.length ? '<ul>' + items.join('') + '</ul>' : '';
+}
+const mediaBlocks = (ctx, ids) => ids.map(id => mediaHtml(ctx, id)).filter(Boolean).map(h => '<p>' + h + '</p>').join('');
+const titled = (title, html) => (html ? '<h2>' + esc(title) + '</h2>' + html : '');
+// Where it is: a link to the location's page (the conversion points it at the new page or the old site) and the address.
+function locationHtml(rec, ctx, refField) {
+  const nid = refIds(rec, refField)[0];
+  const lines = addressLines(rec, 'field_address');
+  if (!nid && !lines.length) return '';
+  const link = nid ? '<a href="/node/' + esc(nid) + '">' + esc((ctx.titles && ctx.titles.get(nid)) || 'Location') + '</a>' : '';
+  return '<p><strong>Location:</strong> ' + [link].concat(lines.map(esc)).filter(Boolean).join('<br>') + '</p>';
+}
+const tel = s => String(s).replace(/[^\d+]/g, '');
+
 // Each module: where its records are, what its listing page is called, and how an entry's page is built.
-// details(rec, terms, tz) returns HTML placed above the body.
+// details(rec, terms, tz, ctx) returns HTML placed above the body, after(...) HTML below it.
+// ctx: { media: mid -> media summary, titles: nid -> title }.
 const MODULES = {
   news: {
     label: 'News', file: 'pages', order: 'date_published',
@@ -1692,6 +1790,48 @@ const MODULES = {
   standard_locations: {
     label: 'Locations', file: 'standard_locations', order: 'alphabetical_by_title',
     details: rec => addressHtml(addressLines(rec, 'field_address'))
+  },
+  events: {
+    label: 'Events', file: 'pages', order: 'date_published',
+    filter: p => p.kind === 'event',
+    details: (rec, terms, tz, ctx) => datesHtml(rec, tz) + locationHtml(rec, ctx, 'field_location_ref'),
+    after: rec => richDetail('Contact', firstValue(rec, 'field_contact_information_body') || '')
+  },
+  meetings: {
+    label: 'Meetings', file: 'meetings', order: 'date_published',
+    // Most meetings share their board's name, so the date tells the pages (and their cards) apart.
+    title: (rec, tz) => {
+      const t = cleanTitle(firstValue(rec, 'title'));
+      const it = fieldItems(rec, 'field_smart_date').find(x => x && x.value);
+      return it ? t + ' – ' + formatDate(String(it.value), tz).replace(/ \d+:\d\d [AP]M$/, '') : t;
+    },
+    details: (rec, terms, tz, ctx) => datesHtml(rec, tz) + locationHtml(rec, ctx, 'field_standard_location') +
+      (firstValue(rec, 'field_short_description') ? '<p>' + esc(firstValue(rec, 'field_short_description')) + '</p>' : ''),
+    after: (rec, terms, tz, ctx) =>
+      titled('Agenda', fileListHtml(ctx, refIds(rec, 'field_agendas')) + linkListHtml(rec, ['field_agendas_links', 'field_agenda_link_html'])) +
+      titled('Agenda Packet', fileListHtml(ctx, refIds(rec, 'field_packets_files')) + linkListHtml(rec, ['field_packets_links', 'field_packets_link_html'])) +
+      titled('Minutes', fileListHtml(ctx, refIds(rec, 'field_minutes_files')) + linkListHtml(rec, ['field_minutes_links'])) +
+      titled('Other Documents', fileListHtml(ctx, refIds(rec, 'field_other_meeting_files'))) +
+      titled('Video', mediaBlocks(ctx, refIds(rec, 'field_meeting_video')) + linkListHtml(rec, ['field_video_links'])) +
+      titled('Audio', linkListHtml(rec, ['field_audio_links']))
+  },
+  people: {
+    label: 'Staff Directory', file: 'directory_listings', order: 'manual',
+    title: rec => cleanTitle(firstValue(rec, 'title')) || cleanTitle([firstValue(rec, 'field_first_name'), firstValue(rec, 'field_last_name')].filter(Boolean).join(' ')),
+    details: (rec, terms, tz, ctx) => {
+      const v = n => { const x = firstValue(rec, n); return x == null ? '' : String(x).trim(); };
+      return mediaBlocks(ctx, refIds(rec, 'field_primary_image_video')) +
+        (v('field_position') ? '<p><strong>' + esc(v('field_position')) + '</strong></p>' : '') +
+        (v('field_email') ? '<p><strong>Email:</strong> <a href="mailto:' + esc(v('field_email')) + '">' + esc(v('field_email')) + '</a></p>' : '') +
+        (v('field_phone_number') ? '<p><strong>Phone:</strong> <a href="tel:' + esc(tel(v('field_phone_number'))) + '">' + esc(v('field_phone_number')) + '</a></p>' : '') +
+        detail('Fax', v('field_fax_number')) + detail('Office hours', v('field_office_hours')) +
+        locationHtml(rec, ctx, 'field_standard_location');
+    },
+    body: rec => firstValue(rec, 'field_profile') || ''
+  },
+  faqs: {
+    label: 'FAQs', file: 'faqs', order: 'alphabetical_by_title',
+    details: () => ''
   }
 };
 const MODULE_TYPES = Object.keys(MODULES);
@@ -1703,41 +1843,67 @@ function moduleEntries(exp, type, opts) {
   const tz = (opts && opts.timeZone) || 'UTC';
   const def = MODULES[type];
   if (!def) throw new Error('Unknown module type ' + type);
+  const ctx = moduleContext(exp);
+  const newestFirst = (a, b) => (b.publishedAt || '').localeCompare(a.publishedAt || '') || a.title.localeCompare(b.title);
   let entries;
-  if (type === 'news') {
-    // News items are page records; their summaries are already loaded.
+  if (def.file === 'pages') {
+    // News items and events are page records; their summaries (with sections) are already loaded.
     const raw = new Map((exp.raw.pages || []).map(r => [String(r.entity_id), r]));
-    entries = exp.pages.filter(def.filter).map(p => ({
-      key: 'news:' + p.nid, type, nid: p.nid, title: p.title, alias: p.alias, published: p.published,
-      bodyHtml: p.bodyHtml, attachments: p.attachments, publishedAt: isoDate(firstValue(raw.get(p.nid), 'field_news_date')),
-      micrositeIds: p.micrositeIds, notes: p.notes.filter(n => !/attachments/i.test(n))
-    }));
-    entries.sort((a, b) => (b.publishedAt || '').localeCompare(a.publishedAt || '') || a.title.localeCompare(b.title));
+    entries = exp.pages.filter(def.filter).map(p => {
+      const rec = raw.get(p.nid);
+      return {
+        key: type + ':' + p.nid, type, nid: p.nid, title: p.title, alias: p.alias, published: p.published,
+        bodyHtml: def.details(rec, exp.terms, tz, ctx) + p.bodyHtml + (def.after ? def.after(rec, exp.terms, tz, ctx) : ''),
+        attachments: p.attachments, sections: p.sections || [], embeddedPages: p.embeddedPages || [], faqSections: p.faqSections || [],
+        primaryMediaId: p.primaryMediaId || '',
+        publishedAt: type === 'news' ? isoDate(firstValue(rec, 'field_news_date')) : sortDate(rec),
+        micrositeIds: p.micrositeIds, notes: p.notes.filter(n => !/attachments|sections|primary image/i.test(n))
+      };
+    });
+    entries.sort(newestFirst);
     return entries;
   }
   entries = (exp.raw[def.file] || []).filter(r => r && r.fields).map(rec => {
-    const body = firstValue(rec, 'body');
+    const body = def.body ? def.body(rec) : firstValue(rec, 'body');
     const notes = [];
-    if (fieldItems(rec, 'field_sections').length) notes.push('Has sections (paragraphs)');
-    if (fieldItems(rec, 'field_primary_image_video').length) notes.push('Has primary image/video');
     if (fieldItems(rec, 'field_location').length) notes.push('Has a map location');
+    const sections = exp.paragraphById ? contentSectionsOf(rec, exp.paragraphById) : [];
     return {
       key: type + ':' + rec.entity_id, type, nid: String(rec.entity_id),
-      title: cleanTitle(firstValue(rec, 'title')) || '(untitled ' + rec.entity_id + ')',
+      title: (def.title ? def.title(rec, tz) : cleanTitle(firstValue(rec, 'title'))) || '(untitled ' + rec.entity_id + ')',
       alias: (fieldItems(rec, 'path')[0] || {}).alias || '', published: rec.is_published === true,
-      bodyHtml: def.details(rec, exp.terms, tz) + (typeof body === 'string' ? body : ''),
-      attachments: fieldItems(rec, 'field_file_attachments').map(it => it && (it.target_id != null ? it.target_id : it.entity_id)).filter(v => v != null).map(String),
-      publishedAt: '', micrositeIds: fieldItems(rec, 'og_audience').map(it => it && it.target_id).filter(Boolean).map(String), notes
+      bodyHtml: def.details(rec, exp.terms, tz, ctx) + (typeof body === 'string' ? body : '') + (def.after ? def.after(rec, exp.terms, tz, ctx) : ''),
+      attachments: refIds(rec, 'field_file_attachments'), sections,
+      embeddedPages: exp.paragraphById ? embeddedPagesOf(rec, exp.paragraphById) : [], faqSections: [],
+      // People show their photo in the details; other records show it at the top of the page.
+      primaryMediaId: type === 'people' ? '' : (refIds(rec, 'field_primary_image_video')[0] || ''),
+      publishedAt: sortDate(rec), micrositeIds: refIds(rec, 'og_audience'), notes,
+      // For linking and ordering cards (see lib/plan.js).
+      weight: Number(firstValue(rec, 'field_weight')) || 0, lastName: cleanTitle(firstValue(rec, 'field_last_name') || ''),
+      groupTermIds: refIds(rec, 'field_directory_list_group'),
+      categoryId: refIds(rec, 'field_faq_category')[0] || ''
     };
   });
-  entries.sort((a, b) => a.title.localeCompare(b.title, 'en', { sensitivity: 'base', numeric: true }));
+  if (def.order === 'date_published') entries.sort(newestFirst);
+  else if (type === 'people') entries.sort((a, b) => (a.lastName || a.title).localeCompare(b.lastName || b.title, 'en', { sensitivity: 'base' }) || a.title.localeCompare(b.title));
+  else entries.sort((a, b) => a.title.localeCompare(b.title, 'en', { sensitivity: 'base', numeric: true }));
   return entries;
+}
+
+// What module pages need from the rest of the export: media (for images and file links) and node titles (locations).
+function moduleContext(exp) {
+  if (exp._moduleContext) return exp._moduleContext;
+  const titles = new Map();
+  for (const file of ['pages', 'microsites', 'standard_locations', 'parks']) for (const r of exp.raw[file] || []) if (r && r.entity_id != null) titles.set(String(r.entity_id), cleanTitle(firstValue(r, 'title')));
+  const ctx = { media: new Map((exp.media || []).map(m => [m.mid, m])), titles };
+  Object.defineProperty(exp, '_moduleContext', { value: ctx, enumerable: false });
+  return ctx;
 }
 
 // How many records each module type has, for the options screen.
 function moduleCounts(exp) {
   const out = {};
-  for (const t of MODULE_TYPES) out[t] = t === 'news' ? exp.pages.filter(p => p.kind === 'news').length : (exp.raw[MODULES[t].file] || []).length;
+  for (const t of MODULE_TYPES) out[t] = MODULES[t].filter ? exp.pages.filter(MODULES[t].filter).length : (exp.raw[MODULES[t].file] || []).length;
   return out;
 }
 
@@ -1834,8 +2000,9 @@ module.exports = { buildNavFromD10, limitTree, isHomeMicrosite, micrositeKey, pa
 // and the dry-run report. Pure: the same input always gives the same plan, so resume can match work
 // to the manifest by key.
 
-const { referencedMedia } = require('./links');
+const { referencedMedia, keyFor } = require('./links');
 const { MODULES, moduleEntries } = require('./modules');
+const { sectionBlocks, primaryMediaHtml } = require('./sections');
 
 const DEFAULT_OPTIONS = Object.freeze({
   menuSource: 'd10',            // 'd10' | 'workbook'
@@ -1844,7 +2011,8 @@ const DEFAULT_OPTIONS = Object.freeze({
   newsEvents: 'skip',           // news and events never become menu pages (news can be imported as a module)
   includeEmptyMicrosites: false,
   includeAttachments: true,     // content mode: list a page's file attachments under a "Documents" heading
-  faqAccordions: true,          // content mode: a page's D10 FAQ sections become one accordion per question in the main column
+  includeSections: true,        // content mode: text, image + text, files and slideshow sections, and the primary image
+  faqAccordions: true,          // content mode, FAQs module off: a page's D10 FAQ sections become one accordion per question
   uploadMedia: true,            // upload the files and images pages link to, and point links at them
   pageUrlPattern: 'auto',       // page addresses for links between pages: 'auto' = each page's url from the CMS, or a pattern like /{slug}
   unmatchedRows: 'empty-page',  // workbook mode: rows with no D10 match become 'empty-page' | 'skip'
@@ -1856,7 +2024,7 @@ const DEFAULT_OPTIONS = Object.freeze({
 });
 
 // Options that must stay the same for the whole of a run (resume rebuilds the same plan).
-const RUN_LOCKED = ['menuSource', 'pageContent', 'unpublishedSourceAs', 'includeAttachments', 'uploadMedia', 'unmatchedRows', 'faqAccordions',
+const RUN_LOCKED = ['menuSource', 'pageContent', 'unpublishedSourceAs', 'includeAttachments', 'includeSections', 'uploadMedia', 'unmatchedRows', 'faqAccordions',
   'embeddedPageCards', 'modules', 'moduleMenu', 'timeZone'];
 const sameOption = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 
@@ -1868,11 +2036,12 @@ function normalizeOptions(o) {
   if (opts.newsEvents !== 'skip') throw new Error('News and events can only be skipped for now');
   if (opts.pageUrlPattern !== 'auto' && !/\{slug\}/.test(opts.pageUrlPattern)) throw new Error('Page URL pattern must contain {slug}, e.g. /{slug}');
   opts.limit = Math.max(0, parseInt(opts.limit, 10) || 0);
-  for (const k of ['includeEmptyMicrosites', 'includeAttachments', 'uploadMedia', 'faqAccordions', 'embeddedPageCards', 'moduleMenu']) opts[k] = !!opts[k];
+  for (const k of ['includeEmptyMicrosites', 'includeAttachments', 'includeSections', 'uploadMedia', 'faqAccordions', 'embeddedPageCards', 'moduleMenu']) opts[k] = !!opts[k];
   opts.modules = [...new Set(opts.modules || [])];
   for (const t of opts.modules) if (!MODULES[t]) throw new Error('Unknown module type "' + t + '"');
   opts.modules.sort((a, b) => Object.keys(MODULES).indexOf(a) - Object.keys(MODULES).indexOf(b));
-  if (opts.pageContent === 'empty') opts.faqAccordions = false;
+  // With the FAQs module, FAQ sections link to the FAQ pages from the right column instead.
+  if (opts.pageContent === 'empty' || opts.modules.includes('faqs')) opts.faqAccordions = false;
   // Module entries always get their content, so uploads stay possible in empty mode when modules are chosen.
   if (opts.pageContent === 'empty' && !opts.modules.length) opts.uploadMedia = false;
   return opts;
@@ -1890,10 +2059,17 @@ function normalizeOptions(o) {
 function buildPlan(tree, options, idx, exp) {
   const opts = normalizeOptions(options);
   const pages = [], menu = [], seen = new Set(), media = [], cardIssues = [];
+  const mediaSet = new Set();
   const addMedia = page => {
     if (!opts.uploadMedia || !idx || page.content !== 'content') return;
-    const html = page.bodyHtml + page.faqs.map(q => q.answerHtml).join('');
-    for (const mid of referencedMedia(idx, html, page.attachments)) if (!media.includes(mid)) media.push(mid);
+    const html = page.bodyHtml + page.faqs.map(q => q.answerHtml).join('') + page.blocks.map(b => b.html).join('');
+    for (const mid of referencedMedia(idx, html, page.attachments)) if (!mediaSet.has(mid)) { mediaSet.add(mid); media.push(mid); }
+  };
+  // Body (with the primary image on top) and section blocks of a D10 page or record.
+  const contentOf = src => {
+    const sec = opts.includeSections && idx ? sectionBlocks(src.sections, idx) : { blocks: [], warnings: [] };
+    const top = opts.includeSections && idx ? primaryMediaHtml(idx, src.primaryMediaId) : '';
+    return { bodyHtml: top + (src.bodyHtml || ''), blocks: sec.blocks, sectionWarnings: sec.warnings, sources: src };
   };
 
   const walk = (nodes, parentMenuKey, path) => {
@@ -1903,13 +2079,15 @@ function buildPlan(tree, options, idx, exp) {
         seen.add(n.key);
         const published = src ? src.published : true;
         const withContent = opts.pageContent === 'content' && !!src;
+        const c = withContent ? contentOf(src) : null;
         const page = {
           key: n.key, title: n.title, sourceType: n.sourceType, nid: src ? src.nid : '', alias: src ? src.alias : '',
           sourcePublished: published, unpublished: !published && opts.unpublishedSourceAs === 'unpublished',
-          content: withContent ? 'content' : 'empty', hasBody: !!(src && src.hasBody), notes: (src && src.notes) || [],
-          bodyHtml: withContent ? src.bodyHtml : '', attachments: withContent && opts.includeAttachments ? (src.attachments || []) : [],
+          content: withContent ? 'content' : 'empty', hasBody: !!(src && (src.hasBody || (c && c.blocks.length))), notes: (src && src.notes) || [],
+          bodyHtml: c ? c.bodyHtml : '', attachments: withContent && opts.includeAttachments ? (src.attachments || []) : [],
+          blocks: c ? c.blocks : [], sectionWarnings: c ? c.sectionWarnings : [],
           faqs: withContent && opts.faqAccordions ? faqsFor(src, idx) : [],
-          cards: [], embedded: (opts.embeddedPageCards && src && src.embeddedPages) || [],
+          cards: [], embedded: (opts.embeddedPageCards && src && src.embeddedPages) || [], src: src || null,
           row: n.row || null
         };
         pages.push(page);
@@ -1924,25 +2102,30 @@ function buildPlan(tree, options, idx, exp) {
 
   // Modules: a listing page per type (cards for every entry) and a page per entry.
   let topWeight = tree.length;
+  const entriesByType = {};
   for (const type of opts.modules) {
     if (!exp) throw new Error('Module import needs the export');
     const def = MODULES[type];
     const all = moduleEntries(exp, type, { timeZone: opts.timeZone || 'UTC' });
     const entries = opts.limit ? all.slice(0, opts.limit) : all; // a test run takes the first few of each module
+    entriesByType[type] = entries;
+    if (!entries.length) continue; // nothing of this type in the export: no empty listing page
     const listKey = 'list:' + type;
     pages.push({
       key: listKey, title: def.label, sourceType: 'listing', nid: '', alias: '', sourcePublished: true, unpublished: false,
-      content: 'empty', hasBody: false, notes: [], bodyHtml: '', attachments: [], faqs: [], embedded: [], row: null, moduleType: type,
+      content: 'empty', hasBody: false, notes: [], bodyHtml: '', attachments: [], faqs: [], blocks: [], sectionWarnings: [], embedded: [], src: null, row: null, moduleType: type,
       // Always manual: with any other order the CMS does not show the cards added to the section (sandbox,
       // 2026-10-29). The entries are already in the module's order (A-Z, news newest first).
       cards: entries.length ? [{ column: 'main', title: '', keys: entries.map(e => e.key), orderBy: 'manual', perPage: 12 }] : []
     });
     if (opts.moduleMenu) menu.push({ key: 'menu:' + listKey, pageKey: listKey, parentKey: null, weight: topWeight++, title: def.label, level: 1, path: '', row: null });
     for (const e of entries) {
+      const c = contentOf(e);
       const page = {
         key: e.key, title: e.title, sourceType: type, nid: e.nid, alias: e.alias, sourcePublished: e.published,
-        unpublished: !e.published && opts.unpublishedSourceAs === 'unpublished', content: 'content', hasBody: !!e.bodyHtml.trim(),
-        notes: e.notes, bodyHtml: e.bodyHtml, attachments: opts.includeAttachments ? e.attachments : [], faqs: [], cards: [], embedded: [],
+        unpublished: !e.published && opts.unpublishedSourceAs === 'unpublished', content: 'content', hasBody: !!(c.bodyHtml.trim() || c.blocks.length),
+        notes: e.notes, bodyHtml: c.bodyHtml, attachments: opts.includeAttachments ? e.attachments : [], blocks: c.blocks, sectionWarnings: c.sectionWarnings,
+        faqs: opts.faqAccordions ? faqsFor(e, idx) : [], cards: [], embedded: (opts.embeddedPageCards && e.embeddedPages) || [], src: e,
         row: null, moduleType: type, listKey, publishedAt: e.publishedAt
       };
       pages.push(page);
@@ -1950,23 +2133,60 @@ function buildPlan(tree, options, idx, exp) {
     }
   }
 
-  // Right-column cards from D10 "embedded pages" sections, now that every page key is known.
+  // Right-column cards, now that every page key is known: D10 "embedded pages", staff and FAQ sections,
+  // and a microsite's meetings and events.
   const keys = new Set(pages.map(p => p.key));
-  const keyOf = nid => { const n = idx && idx.nodes.get(nid); return !n ? null : (n.kind === 'news' ? 'news:' : n.sourceType + ':') + nid; };
+  const issue = (p, header, nid, title, reason) => cardIssues.push({ page: p.title, nid: p.nid, section: header, target: nid, targetTitle: title, reason });
+  const gutter = (p, title, found, perPage) => { if (found.length) p.cards.push({ column: 'gutter', title, keys: found, orderBy: 'manual', perPage: perPage || Math.max(found.length, 3) }); };
+  const people = entriesByType.people || [];
   for (const p of pages) {
     for (const sec of p.embedded) {
       const found = [];
       for (const nid of sec.nids) {
-        const k = keyOf(nid);
+        const k = idx ? keyFor(idx, nid) : null;
         if (k && keys.has(k)) { if (!found.includes(k)) found.push(k); continue; }
         const n = idx && idx.nodes.get(nid);
-        cardIssues.push({ page: p.title, nid: p.nid, section: sec.header, target: nid, targetTitle: n ? n.title : '',
-          reason: !n ? 'not in the export' : n.kind === 'news' || MODULES[n.kind] ? n.kind + ' item; select that module to import it' : 'that page is not imported' });
+        issue(p, sec.header, nid, n ? n.title : '', !n ? 'not in the export' : n.kind === 'news' || n.kind === 'event' || MODULES[n.kind] ? n.kind + ' item; select that module to import it' : 'that page is not imported');
       }
-      if (!sec.nids.length) cardIssues.push({ page: p.title, nid: p.nid, section: sec.header, target: '', targetTitle: '', reason: 'section lists no pages' });
-      if (found.length) p.cards.push({ column: 'gutter', title: sec.header, keys: found, orderBy: 'manual', perPage: Math.max(found.length, 3) });
+      if (!sec.nids.length) issue(p, sec.header, '', '', 'section lists no pages');
+      gutter(p, sec.header, found);
     }
     delete p.embedded;
+    const src = p.src;
+    delete p.src;
+    if (!src || p.content !== 'content') continue;
+
+    // Staff sections: the people listed, a department's people, or a custom group's people.
+    for (const s of (src.sections || []).filter(x => x.bundle === 'embedded_directory_listings')) {
+      const header = s.header || 'Contacts';
+      if (!opts.modules.includes('people')) { issue(p, header, '', '', 'staff section; select Staff Directory to import it'); continue; }
+      let list;
+      if (s.groupTermId) list = people.filter(e => e.groupTermIds.includes(s.groupTermId));
+      else if (s.departmentId && !s.peopleIds.length) list = people.filter(e => e.micrositeIds.includes(s.departmentId)).sort((a, b) => a.weight - b.weight);
+      else list = s.peopleIds.map(id => people.find(e => e.nid === id)).filter(Boolean);
+      const found = list.map(e => e.key).filter(k => keys.has(k));
+      if (!found.length) issue(p, header, '', '', 'staff section lists nobody that is imported');
+      gutter(p, header, found);
+    }
+    // FAQ sections, when FAQs are pages: cards to the FAQs of that category.
+    if (opts.modules.includes('faqs')) {
+      for (const sec of src.faqSections || []) {
+        const inCat = ((idx && idx.faqCategories.get(sec.categoryId)) || []).map(f => 'faqs:' + f.nid).filter(k => keys.has(k));
+        if (!inCat.length) issue(p, sec.header || 'FAQs', '', '', 'FAQ section shows no imported FAQs');
+        gutter(p, sec.header || 'FAQs', inCat);
+      }
+    }
+    // What else belongs to a microsite (D10 og_audience): its staff and FAQs not already carded above, and its
+    // meetings and events (newest first), in pages of 5.
+    if (p.sourceType === 'microsite') {
+      const carded = new Set(p.cards.flatMap(c => c.keys));
+      for (const [type, title] of [['people', 'Staff'], ['faqs', 'FAQs'], ['meetings', 'Meetings'], ['events', 'Events']]) {
+        let list = (entriesByType[type] || []).filter(e => e.micrositeIds.includes(p.nid) && !carded.has(e.key));
+        if (type === 'people') list = list.slice().sort((a, b) => a.weight - b.weight);
+        const found = list.map(e => e.key);
+        gutter(p, title, found, Math.min(found.length, 5) || 3);
+      }
+    }
   }
   return { options: opts, pages, menu, media, cardIssues };
 }
@@ -2027,8 +2247,8 @@ module.exports = { DEFAULT_OPTIONS, RUN_LOCKED, sameOption, normalizeOptions, bu
 
 const { fieldItems, firstValue, cleanTitle } = require('./d10');
 
-// One row per FAQ group (microsite + category): the D10 pages whose FAQ sections show it (they get accordions
-// in content mode), the microsite it belongs to, and its questions in weight order.
+// One row per FAQ group (microsite + category): the D10 pages whose FAQ sections show it (they link to the FAQ
+// pages, or get accordions when FAQs are not pages), the microsite it belongs to, and its questions in weight order.
 function faqReport(exp) {
   const faqs = exp.raw.faqs || [];
   const ms = new Map(exp.microsites.map(m => [m.nid, m]));
@@ -2064,7 +2284,7 @@ function faqReport(exp) {
 
 const FAQ_COLUMNS = [
   { key: 'microsite', label: 'Microsite' }, { key: 'micrositeNid', label: 'Microsite nid' }, { key: 'wouldGoOn', label: 'Would go on' },
-  { key: 'category', label: 'FAQ category' }, { key: 'onPages', label: 'Shown on D10 pages (become accordions)' }, { key: 'count', label: 'FAQs' }, { key: 'published', label: 'Published' },
+  { key: 'category', label: 'FAQ category' }, { key: 'onPages', label: 'Shown on D10 pages' }, { key: 'count', label: 'FAQs' }, { key: 'published', label: 'Published' },
   { key: 'questions', label: 'Questions (in weight order)' }, { key: 'nids', label: 'FAQ nids' }, { key: 'oldUrls', label: 'Old URLs' }
 ];
 
@@ -2076,9 +2296,9 @@ function outOfScopeReport(exp) {
     rows.push({ type, records: recs.length, published: recs.filter(r => r && r.is_published === true).length, note });
   };
   const r = exp.raw;
-  count('FAQs', r.faqs, 'Imported as accordions on the pages whose FAQ sections show them (content mode). FAQs no page shows are not imported; see the FAQ report.');
-  count('Meetings', r.meetings, 'Not imported yet (waiting for a Streamline meetings update).');
-  count('Directory listings', r.directory_listings, 'People: not imported yet (waiting for a Streamline update).');
+  count('FAQs', r.faqs, 'With FAQs selected: one page per FAQ, linked from the right column of the pages whose FAQ sections show it and of its microsite. Without: accordions on the pages whose FAQ sections show them.');
+  count('Meetings', r.meetings, 'With Meetings selected: one page per meeting (date, location, agendas, packets, minutes, video links), linked from its microsite (right column).');
+  count('Directory listings', r.directory_listings, 'With Staff Directory selected: one page per person, linked from the right column of the pages whose staff sections list them, and of their microsite.');
   count('Business directory', r.business_directory, 'Imported as pages when Business Directory is selected under Module content.');
   count('Parks', r.parks, 'Imported as pages when Parks is selected under Module content.');
   count('Bids and RFPs', r.bids_rfps, 'Imported as pages when Bids & RFPs is selected under Module content.');
@@ -2087,20 +2307,20 @@ function outOfScopeReport(exp) {
   count('Projects', r.projects, 'Imported as pages when Projects is selected under Module content.');
   count('Property listings', r.property_listings, 'Not imported (no module yet; none in the sample exports).');
   count('Locations', r.standard_locations, 'Imported as pages when Locations is selected under Module content.');
-  count('Paragraphs', r.paragraphs, 'Section content used by pages and microsites (field_sections). Not imported.');
+  count('Paragraphs', r.paragraphs, 'Section content of pages and microsites (field_sections): text, image + text, files and slideshows are imported under the body; embedded pages, staff and FAQ sections become right-column cards. Homepage widgets (cards, tabs, social media, custom text) are not imported.');
   const news = exp.pages.filter(p => p.kind === 'news'), events = exp.pages.filter(p => p.kind === 'event');
   rows.push({ type: 'News items', records: news.length, published: news.filter(p => p.published).length, note: 'Imported as dated pages when News is selected under Module content; never menu pages.' });
-  rows.push({ type: 'Events', records: events.length, published: events.filter(p => p.published).length, note: 'Not imported yet (waiting for a Streamline events update).' });
+  rows.push({ type: 'Events', records: events.length, published: events.filter(p => p.published).length, note: 'With Events selected: one page per event (dates, location), linked from its microsite (right column).' });
   const regular = exp.pages.filter(p => p.kind === 'page');
   const has = re => regular.filter(p => p.notes.some(n => re.test(n)));
   const pr = (type, list, note) => rows.push({ type, records: list.length, published: list.filter(p => p.published).length, note });
-  pr('Pages with sections', has(/sections/i), 'Their field_sections (paragraph) content is not imported; only the body is.');
+  pr('Pages with sections', has(/sections/i), 'Imported with the body when Import D10 page sections is on (see Paragraphs).');
   pr('Pages that redirect', has(/^Redirect/), 'Imported as ordinary pages. Streamline has redirect pages (redirect/redirectUrl) for a later version.');
-  pr('Pages with a primary image or video', has(/primary image/i), 'The primary image is not imported.');
+  pr('Pages with a primary image or video', has(/primary image/i), 'Shown at the top of the page when Import D10 page sections is on. A video is a link.');
   const layout = (r.microsites || []).filter(m => m && m.fields && Array.isArray(m.fields.layout_builder__layout) && m.fields.layout_builder__layout.length);
   rows.push({ type: 'Microsites with Layout Builder content', records: layout.length, published: layout.filter(m => m.is_published).length, note: 'Layout Builder content is not imported; only the microsite body is.' });
   const msSections = exp.microsites.filter(m => m.notes.length);
-  rows.push({ type: 'Microsites with sections', records: msSections.length, published: msSections.filter(m => m.published).length, note: 'Their field_sections content is not imported.' });
+  rows.push({ type: 'Microsites with sections', records: msSections.length, published: msSections.filter(m => m.published).length, note: 'Imported like page sections.' });
   const videos = (exp.media || []).filter(m => m.kind === 'video');
   rows.push({ type: 'Video media', records: videos.length, published: videos.filter(m => m.published).length, note: 'Links to videos are kept as external links; videos are not uploaded.' });
   return rows;
@@ -2202,6 +2422,75 @@ function checkSchema(schema) {
 }
 
 module.exports = { INTROSPECTION, typeRef, toSdl, checkSchema };
+
+  },
+  "lib/sections": function (module, exports, require) {
+'use strict';
+// D10 page sections (paragraphs) as Streamline main-column content: one block per section, in D10 order.
+// Each block is HTML in the same shape a D10 body uses, so the usual conversion uploads its images and files
+// and points its links at the new site:
+//   images -> <drupal-media data-entity-uuid>     (an image in the freeform section)
+//   files  -> <a href="/media/N">                  (a link to the uploaded file)
+// A section D10 showed collapsed or open becomes an accordion titled with the section's heading.
+// Embedded pages, staff (directory listings) and FAQ sections are not blocks: they become right-column cards.
+// Pure.
+
+const esc = s => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+
+// Bundles placed elsewhere (cards), not as main-column blocks.
+const CARD_BUNDLES = ['embedded_pages', 'faqs', 'embedded_directory_listings'];
+
+// A media item as body HTML: an image (or video link) embedded, or a document link.
+function mediaHtml(idx, mid) {
+  const m = idx.media.get(String(mid));
+  if (!m) return '';
+  if (m.kind === 'image' || m.kind === 'video') return m.uuid ? '<drupal-media data-entity-type="media" data-entity-uuid="' + esc(m.uuid) + '"></drupal-media>' : '';
+  return '<a href="/media/' + esc(m.mid) + '">' + esc(m.name || m.fileName || 'Document') + '</a>';
+}
+const fileListHtml = (idx, ids) => {
+  const items = ids.map(id => idx.media.get(String(id))).filter(Boolean);
+  return items.length ? '<ul>' + items.map(m => '<li><a href="/media/' + esc(m.mid) + '">' + esc(m.name || m.fileName || 'Document') + '</a></li>').join('') + '</ul>' : '';
+};
+const headingTag = t => (/^h[2-6]$/.test(t) ? t : 'h2');
+
+// sections: page summary .sections (d10.contentSectionsOf). Returns { blocks, warnings }.
+//   blocks: [{ kind, title, accordion, html, pid }]  (title is the accordion title; otherwise the heading is in html)
+function sectionBlocks(sections, idx) {
+  const blocks = [], warnings = [];
+  const missing = (s, mid) => { if (mid && !idx.media.has(String(mid))) warnings.push({ code: 'section-media-missing', detail: s.bundle + ' section ' + s.pid + ': media ' + mid + ' is not in www-media.json' }); };
+  for (const s of sections || []) {
+    if (CARD_BUNDLES.includes(s.bundle)) continue;
+    let html = '';
+    if (s.bundle === 'text') html = s.html;
+    else if (s.bundle === 'image_text') {
+      missing(s, s.imageId);
+      // Streamline images sit on their own line, so a left or right image goes above its text.
+      const img = s.imageId ? mediaHtml(idx, s.imageId) : '';
+      const link = s.imageLink ? '<p><a href="' + esc(s.imageLink.url) + '">' + esc(s.imageLink.title || s.imageLink.url) + '</a></p>' : '';
+      html = (img ? '<p>' + img + '</p>' : '') + link + s.html;
+    } else if (s.bundle === 'files') {
+      if (s.fileSource && s.fileSource !== 'individual') warnings.push({ code: 'section-files-by-category', detail: 'files section ' + s.pid + ' lists files by category; not imported' });
+      s.mediaIds.forEach(mid => missing(s, mid));
+      html = fileListHtml(idx, s.mediaIds);
+    } else if (s.bundle === 'slideshow') {
+      s.mediaIds.forEach(mid => missing(s, mid));
+      html = s.html + s.mediaIds.map(mid => mediaHtml(idx, mid)).filter(Boolean).map(x => '<p>' + x + '</p>').join('');
+    } else {
+      warnings.push({ code: 'section-not-imported', detail: (s.bundle || 'unknown') + ' section ' + s.pid + ' is not imported' });
+      continue;
+    }
+    if (!html.trim()) { warnings.push({ code: 'section-empty', detail: s.bundle + ' section ' + s.pid + (s.header ? ' "' + s.header + '"' : '') + ' has nothing to show' }); continue; }
+    const accordion = (s.collapsing === 'open' || s.collapsing === 'collapsed') && !!s.header;
+    const t = headingTag(s.headerType);
+    blocks.push({ kind: s.bundle, pid: s.pid, accordion, title: accordion ? s.header : '', html: (!accordion && s.header ? '<' + t + '>' + esc(s.header) + '</' + t + '>' : '') + html });
+  }
+  return { blocks, warnings };
+}
+
+// The page's primary image (or video link) as HTML for the top of its body.
+const primaryMediaHtml = (idx, mid) => { const h = mid ? mediaHtml(idx, mid) : ''; return h ? '<p>' + h + '</p>' : ''; };
+
+module.exports = { sectionBlocks, primaryMediaHtml, mediaHtml, fileListHtml, CARD_BUNDLES, esc };
 
   },
   "lib/sitemap": function (module, exports, require) {
@@ -2704,6 +2993,9 @@ async function uploadMediaPhase(media, ctx, check, save) {
   log('  ' + made + ' uploaded, ' + failed + ' could not be downloaded, ' + (media.length - made - failed) + ' already done or skipped');
 }
 
+// Section ids of a page's blocks after the body (manifests from before 0.9 called them faqSectionIds).
+const blockSectionIds = rec => (rec && (rec.blockSectionIds || rec.faqSectionIds)) || [];
+
 async function contentPhase(plan, ctx, check, save) {
   const { api, manifest: m, log, idx } = ctx;
   const opts = { includeAttachments: plan.options.includeAttachments };
@@ -2726,7 +3018,7 @@ async function contentPhase(plan, ctx, check, save) {
     if (p.content !== 'content' || man.pageStageAtLeast(rec, 'content')) continue;
     ctx.status('Writing content, page ' + n + ' of ' + plan.pages.length + ': ' + p.title);
     const c = buildPageContent(p, idx, lookups, opts);
-    if (c.empty && !c.faqs.length) { man.setPageStage(m, p.key, 'content', { contentEmpty: true }); save(); empty++; continue; }
+    if (c.empty && !c.blocks.length) { man.setPageStage(m, p.key, 'content', { contentEmpty: true }); save(); empty++; continue; }
 
     // The main column, looked up once per page and only when a section still has to be added.
     let mainId = null;
@@ -2738,8 +3030,8 @@ async function contentPhase(plan, ctx, check, save) {
       return (mainId = col.id);
     };
 
-    // Body first (weight 1), then one accordion per FAQ, in D10 order. Each section id is saved as soon as it
-    // exists, so a resume fills in the same sections instead of adding new ones.
+    // Body first (weight 1), then the D10 sections and FAQ accordions, in order. Each section id is saved as soon
+    // as it exists, so a resume fills in the same sections instead of adding new ones.
     if (!c.empty) {
       if (!rec.sectionId) {
         man.setPageStage(m, p.key, 'section', { sectionId: await api.addSection(rec.streamlineId, 'Freeform', await main(), 1) });
@@ -2747,26 +3039,25 @@ async function contentPhase(plan, ctx, check, save) {
       }
       await api.setFreeform(m.pages[p.key].sectionId, c.html, c.json);
     }
-    const faqIds = (m.pages[p.key].faqSectionIds || []).slice();
-    for (let i = 0; i < c.faqs.length; i++) {
+    const ids = blockSectionIds(m.pages[p.key]).slice();
+    for (let i = 0; i < c.blocks.length; i++) {
       check();
-      const q = c.faqs[i];
-      if (!faqIds[i]) {
-        faqIds[i] = await api.addSection(rec.streamlineId, 'Freeform', await main(), (c.empty ? 1 : 2) + i);
-        man.recordPage(m, p.key, { faqSectionIds: faqIds.slice() });
+      const b = c.blocks[i];
+      if (!ids[i]) {
+        ids[i] = await api.addSection(rec.streamlineId, 'Freeform', await main(), (c.empty ? 1 : 2) + i);
+        man.recordPage(m, p.key, { blockSectionIds: ids.slice() });
         save();
       }
-      await api.setFreeform(faqIds[i], q.html, q.json);
-      await api.setFreeformPreferences(faqIds[i], { accordion: true, accordionTitle: q.question });
-      accordions++;
+      await api.setFreeform(ids[i], b.html, b.json);
+      if (b.accordion) { await api.setFreeformPreferences(ids[i], { accordion: true, accordionTitle: b.title }); accordions++; }
     }
     const oldSite = c.links.filter(l => l.outcome === 'old-site').length;
-    man.setPageStage(m, p.key, 'content', { contentWarnings: c.warnings.length, linksToOldSite: oldSite, faqs: c.faqs.length });
+    man.setPageStage(m, p.key, 'content', { contentWarnings: c.warnings.length, linksToOldSite: oldSite, sections: c.blocks.length });
     save();
     written++;
     if (written % 25 === 0) log('  … ' + written + ' pages written');
   }
-  log('  ' + written + ' written' + (accordions ? ' (' + accordions + ' FAQ accordions)' : '') + ', ' + empty + ' had no body');
+  log('  ' + written + ' written' + (accordions ? ' (' + accordions + ' accordions)' : '') + ', ' + empty + ' had no content');
 }
 
 // Teasers sections of link cards. Each section's id, and whether its cards were added, are saved as soon as they
@@ -2788,7 +3079,7 @@ async function cardsPhase(plan, ctx, check, save) {
       return c.id;
     };
     // Main-column cards go after the body and FAQ sections; right-column cards are the only sections there.
-    const mainBase = 1 + (m.pages[p.key].sectionId ? 1 : 0) + ((m.pages[p.key].faqSectionIds || []).length);
+    const mainBase = 1 + (m.pages[p.key].sectionId ? 1 : 0) + blockSectionIds(m.pages[p.key]).length;
     const ids = (m.pages[p.key].cardSectionIds || []).slice(), done = (m.pages[p.key].cardsDone || []).slice();
     let gutterIndex = 0, mainIndex = 0;
     for (let i = 0; i < p.cards.length; i++) {
@@ -3204,7 +3495,8 @@ const state = {
   exp: null, idx: null, sourceLabel: '',
   siteMap: null, overrides: null, overridesLabel: '',
   nav: null, match: null, plan: null, preview: null,
-  options: Object.assign({}, DEFAULT_OPTIONS, { unmatchedRows: 'empty-page' }),
+  // Everything the export has is imported unless unticked: content, and every module type.
+  options: Object.assign({}, DEFAULT_OPTIONS, { unmatchedRows: 'empty-page', pageContent: 'content', modules: MODULE_TYPES.slice() }),
   manifest: null, errors: []
 };
 let platform = {};
@@ -3423,8 +3715,12 @@ function openPanel() {
         body.appendChild(checkbox('List each page\'s file attachments under a "Documents" heading', o.includeAttachments, v => { o.includeAttachments = v; }));
         body.appendChild(checkbox('Upload the files and images pages link to, and point the links at them', o.uploadMedia, v => { o.uploadMedia = v; }));
         body.appendChild(note('Off: links to files keep pointing at the old site. Downloads come from the old site, so Tampermonkey asks once to allow it.'));
-        body.appendChild(checkbox('Turn D10 FAQ sections into accordions (one per question, in the main column)', o.faqAccordions, v => { o.faqAccordions = v; }));
-        body.appendChild(note('Streamline only allows link cards in the right column, so FAQs go under the page body.'));
+        body.appendChild(checkbox('Import D10 page sections: text, image + text, files and slideshows, and each page\'s primary image', o.includeSections, v => { o.includeSections = v; }));
+        body.appendChild(note('Each section becomes a section under the body, in D10 order. Sections D10 showed collapsed become accordions.'));
+        if (!o.modules.includes('faqs')) {
+          body.appendChild(checkbox('Turn D10 FAQ sections into accordions (one per question, in the main column)', o.faqAccordions, v => { o.faqAccordions = v; }));
+          body.appendChild(note('Only when the FAQs module below is off. With it on, each FAQ is its own page, linked from the right column of the pages that show it.'));
+        }
         const row = h('label', '', 'display:block;margin:8px 0;');
         row.appendChild(document.createTextNode('Page URL pattern: '));
         const pat = document.createElement('input'); pat.type = 'text'; pat.value = o.pageUrlPattern === 'auto' ? '' : o.pageUrlPattern; pat.placeholder = 'auto (each page\'s address from the CMS)'; pat.style.cssText = 'width:280px;';
@@ -3439,11 +3735,11 @@ function openPanel() {
       body.appendChild(note('Square cards (Teasers, card layout), titled with the section heading. Cards only link to pages this run imports.'));
 
       body.appendChild(heading('Module content'));
-      body.appendChild(hint('Each entry becomes a page (details, body and attachments), listed as cards on a listing page per module. Meetings, events and people are not imported yet.'));
+      body.appendChild(hint('Each entry becomes a page (details, body, sections and attachments), listed as cards on a listing page per module. Meetings, events, staff and FAQs have no Streamline module yet, so they are pages too, linked from the right column of the pages D10 showed them on: staff and FAQ sections, and a microsite\'s meetings and events.'));
       const counts = moduleCounts(state.exp);
       for (const t of MODULE_TYPES) {
         const n = counts[t] || 0;
-        body.appendChild(checkbox(MODULES[t].label + ' (' + n + ')', o.modules.includes(t), v => { o.modules = v ? o.modules.concat(t) : o.modules.filter(x => x !== t); }, !n));
+        body.appendChild(checkbox(MODULES[t].label + ' (' + n + ')', o.modules.includes(t), v => { o.modules = v ? o.modules.concat(t) : o.modules.filter(x => x !== t); if (t === 'faqs') draw(); }, !n));
       }
       body.appendChild(checkbox('Add each module listing page to the primary menu', o.moduleMenu, v => { o.moduleMenu = v; }));
       const tzRow = h('label', '', 'display:block;margin:8px 0;');
@@ -3496,14 +3792,21 @@ function openPanel() {
       'Will create ' + p.pages.length + ' pages and ' + p.menu.length + ' primary menu items (' + tops + ' at the top level).',
       'Pages imported as unpublished: ' + p.pages.filter(x => x.unpublished).length + '.',
       o.pageContent === 'content'
-        ? 'Content: ' + [...pv.byKey.values()].filter(c => !c.empty).length + ' pages get their D10 body' + (o.includeAttachments ? ' and attachments' : '') + '; ' + (p.pages.length - [...pv.byKey.values()].filter(c => !c.empty || c.faqs.length).length) + ' stay empty (no body in D10).'
+        ? 'Content: ' + [...pv.byKey.values()].filter(c => !c.empty).length + ' pages get their D10 body' + (o.includeAttachments ? ' and attachments' : '') + '; ' + (p.pages.length - [...pv.byKey.values()].filter(c => !c.empty || c.blocks.length).length) + ' stay empty (no content in D10).'
         : 'All pages are empty (title only).'
     ];
     const lists = p.pages.filter(x => x.sourceType === 'listing');
     if (lists.length) lines.push('Modules: ' + lists.map(l => l.title + ' (' + (l.cards[0] ? l.cards[0].keys.length : 0) + ')').join(', ') + '. Each entry is a page, listed as cards on its listing page' + (o.moduleMenu ? ', which gets a menu item' : '') + '.');
     const cardPages = p.pages.filter(x => x.cards.some(c => c.column === 'gutter'));
     if (cardPages.length) lines.push('Right-column cards: ' + cardPages.reduce((s, x) => s + x.cards.filter(c => c.column === 'gutter').reduce((t, c) => t + c.keys.length, 0), 0) + ' on ' + cardPages.length + ' page(s).');
-    if (p.cardIssues.length) lines.push('Embedded-page links that cannot become cards: ' + p.cardIssues.length + ' (see the card report).');
+    if (p.cardIssues.length) lines.push('Right-column links that cannot become cards: ' + p.cardIssues.length + ' (see the card report).');
+    const secPages = p.pages.filter(x => x.blocks && x.blocks.length);
+    if (secPages.length) {
+      const kinds = {};
+      for (const x of secPages) for (const b of x.blocks) kinds[b.kind] = (kinds[b.kind] || 0) + 1;
+      const NAMES = { text: 'text', image_text: 'image + text', files: 'files', slideshow: 'slideshow' };
+      lines.push('D10 sections (main column, after the body): ' + Object.entries(kinds).map(([k, n]) => n + ' ' + (NAMES[k] || k)).join(', ') + ' on ' + secPages.length + ' page(s). Sections D10 showed collapsed become accordions.');
+    }
     const faqPages = p.pages.filter(x => x.faqs && x.faqs.length);
     if (faqPages.length) lines.push('FAQ accordions: ' + faqPages.reduce((s, x) => s + x.faqs.length, 0) + ' on ' + faqPages.length + ' page(s): ' + faqPages.slice(0, 5).map(x => x.title + ' (' + x.faqs.length + ')').join(', ') + (faqPages.length > 5 ? ', …' : '') + '.');
     const missingAtt = pv.warnings.filter(w => /attachment-missing/.test(w)).length;
@@ -3538,15 +3841,15 @@ function openPanel() {
     if (pv.byKey.size) {
       panel.appendChild(heading('Content preview'));
       const sel = document.createElement('select'); sel.style.cssText = 'max-width:100%;';
-      const withBody = p.pages.filter(x => pv.byKey.has(x.key) && (!pv.byKey.get(x.key).empty || pv.byKey.get(x.key).faqs.length));
-      for (const x of withBody) { const op = document.createElement('option'); op.value = x.key; op.textContent = x.title + ' (nid ' + x.nid + ')' + (x.faqs.length ? ' · ' + x.faqs.length + ' FAQs' : ''); sel.appendChild(op); }
+      const withBody = p.pages.filter(x => pv.byKey.has(x.key) && (!pv.byKey.get(x.key).empty || pv.byKey.get(x.key).blocks.length));
+      for (const x of withBody) { const op = document.createElement('option'); op.value = x.key; const nb = pv.byKey.get(x.key).blocks.length; op.textContent = x.title + ' (nid ' + x.nid + ')' + (nb ? ' · ' + nb + ' section(s)' : ''); sel.appendChild(op); }
       const view = h('div', null, 'border:1px solid #ddd;border-radius:4px;padding:10px 14px;margin-top:6px;max-height:300px;overflow:auto;font-size:14px;line-height:1.5;');
       // The html is generated by the converter from escaped text, so it is safe to show here.
-      // FAQs show as <details> so they open and close the way the accordions will.
+      // Accordions show as <details> so they open and close the way they will on the page.
       const qEsc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;');
       const show = () => {
         const c = pv.byKey.get(sel.value);
-        view.innerHTML = !c ? '' : (c.empty ? '' : c.html) + c.faqs.map(f => '<details style="border:1px solid #2760b0;border-radius:4px;margin:8px 0;padding:6px 10px;"><summary style="cursor:pointer;font-weight:600;color:#2760b0;">' + qEsc(f.question) + '</summary>' + f.html + '</details>').join('');
+        view.innerHTML = !c ? '' : (c.empty ? '' : c.html) + c.blocks.map(b => b.accordion ? '<details style="border:1px solid #2760b0;border-radius:4px;margin:8px 0;padding:6px 10px;"><summary style="cursor:pointer;font-weight:600;color:#2760b0;">' + qEsc(b.title) + '</summary>' + b.html + '</details>' : '<div style="border-top:1px dashed #bbb;margin-top:8px;padding-top:4px;">' + b.html + '</div>').join('');
       };
       sel.onchange = show;
       panel.appendChild(sel); panel.appendChild(view);
@@ -3818,5 +4121,5 @@ module.exports = { openPanel, setPlatform };
     });
     return module.exports;
   }
-  load('main').start("0.8.0");
+  load('main').start("0.9.0");
 })();
