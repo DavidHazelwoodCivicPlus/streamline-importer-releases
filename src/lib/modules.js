@@ -138,8 +138,12 @@ const MODULES = {
       const it = fieldItems(rec, 'field_smart_date').find(x => x && x.value);
       return it ? t + ' – ' + formatDate(String(it.value), tz).replace(/ \d+:\d\d [AP]M$/, '') : t;
     },
-    details: (rec, terms, tz, ctx) => datesHtml(rec, tz) + locationHtml(rec, ctx, 'field_standard_location') +
-      (firstValue(rec, 'field_short_description') ? '<p>' + esc(firstValue(rec, 'field_short_description')) + '</p>' : ''),
+    details: (rec, terms, tz, ctx) => {
+      // The short description is often the body's first line again: shown only when the body does not say it.
+      const short = cleanTitle(firstValue(rec, 'field_short_description') || '');
+      const bodyText = cleanTitle(String(firstValue(rec, 'body') || '').replace(/<[^>]+>/g, ' ').replace(/&nbsp;/g, ' '));
+      return datesHtml(rec, tz) + locationHtml(rec, ctx, 'field_standard_location') + (short && !bodyText.includes(short) ? '<p>' + esc(short) + '</p>' : '');
+    },
     after: (rec, terms, tz, ctx) =>
       titled('Agenda', fileListHtml(ctx, refIds(rec, 'field_agendas')) + linkListHtml(rec, ['field_agendas_links', 'field_agenda_link_html'])) +
       titled('Agenda Packet', fileListHtml(ctx, refIds(rec, 'field_packets_files')) + linkListHtml(rec, ['field_packets_links', 'field_packets_link_html'])) +

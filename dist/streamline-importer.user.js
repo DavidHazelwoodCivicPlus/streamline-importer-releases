@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Drupal 10 to Streamline Importer
 // @namespace    civicplus.streamline.d10importer
-// @version      0.9.0
+// @version      0.9.1
 // @description  Create Streamline pages and the primary menu from a Drupal 10 export (www-*.json). Runs only on the Streamline sites you turn it on for (Tampermonkey menu).
 // @match        https://*/*
 // @resource     xlsx https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js
@@ -17,7 +17,7 @@
 // @updateURL    https://raw.githubusercontent.com/DavidHazelwoodCivicPlus/streamline-importer-releases/main/dist/streamline-importer.meta.js
 // @downloadURL  https://raw.githubusercontent.com/DavidHazelwoodCivicPlus/streamline-importer-releases/main/dist/streamline-importer.user.js
 // ==/UserScript==
-// Built 2026-11-03T21:40:25.585Z. Do not edit; edit src/ and run "npm run build".
+// Built 2026-11-03T22:03:16.990Z. Do not edit; edit src/ and run "npm run build".
 
 (function () {
   'use strict';
@@ -1805,8 +1805,12 @@ const MODULES = {
       const it = fieldItems(rec, 'field_smart_date').find(x => x && x.value);
       return it ? t + ' – ' + formatDate(String(it.value), tz).replace(/ \d+:\d\d [AP]M$/, '') : t;
     },
-    details: (rec, terms, tz, ctx) => datesHtml(rec, tz) + locationHtml(rec, ctx, 'field_standard_location') +
-      (firstValue(rec, 'field_short_description') ? '<p>' + esc(firstValue(rec, 'field_short_description')) + '</p>' : ''),
+    details: (rec, terms, tz, ctx) => {
+      // The short description is often the body's first line again: shown only when the body does not say it.
+      const short = cleanTitle(firstValue(rec, 'field_short_description') || '');
+      const bodyText = cleanTitle(String(firstValue(rec, 'body') || '').replace(/<[^>]+>/g, ' ').replace(/&nbsp;/g, ' '));
+      return datesHtml(rec, tz) + locationHtml(rec, ctx, 'field_standard_location') + (short && !bodyText.includes(short) ? '<p>' + esc(short) + '</p>' : '');
+    },
     after: (rec, terms, tz, ctx) =>
       titled('Agenda', fileListHtml(ctx, refIds(rec, 'field_agendas')) + linkListHtml(rec, ['field_agendas_links', 'field_agenda_link_html'])) +
       titled('Agenda Packet', fileListHtml(ctx, refIds(rec, 'field_packets_files')) + linkListHtml(rec, ['field_packets_links', 'field_packets_link_html'])) +
@@ -2027,6 +2031,7 @@ const DEFAULT_OPTIONS = Object.freeze({
 const RUN_LOCKED = ['menuSource', 'pageContent', 'unpublishedSourceAs', 'includeAttachments', 'includeSections', 'uploadMedia', 'unmatchedRows', 'faqAccordions',
   'embeddedPageCards', 'modules', 'moduleMenu', 'timeZone'];
 const sameOption = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+const RECENT_CARDS = 10; // newest meetings / events shown on their microsite
 
 function normalizeOptions(o) {
   const opts = Object.assign({}, DEFAULT_OPTIONS, o || {});
@@ -2177,14 +2182,14 @@ function buildPlan(tree, options, idx, exp) {
       }
     }
     // What else belongs to a microsite (D10 og_audience): its staff and FAQs not already carded above, and its
-    // meetings and events (newest first), in pages of 5.
+    // 10 newest meetings and events. The CMS shows every card of a hand-picked card section (it ignores perPage,
+    // sandbox 2026-11-03), so older meetings and events are reached from the Meetings and Events listing pages.
     if (p.sourceType === 'microsite') {
       const carded = new Set(p.cards.flatMap(c => c.keys));
-      for (const [type, title] of [['people', 'Staff'], ['faqs', 'FAQs'], ['meetings', 'Meetings'], ['events', 'Events']]) {
+      for (const [type, title, max] of [['people', 'Staff', 0], ['faqs', 'FAQs', 0], ['meetings', 'Meetings', RECENT_CARDS], ['events', 'Events', RECENT_CARDS]]) {
         let list = (entriesByType[type] || []).filter(e => e.micrositeIds.includes(p.nid) && !carded.has(e.key));
         if (type === 'people') list = list.slice().sort((a, b) => a.weight - b.weight);
-        const found = list.map(e => e.key);
-        gutter(p, title, found, Math.min(found.length, 5) || 3);
+        gutter(p, title, list.map(e => e.key).slice(0, max || undefined));
       }
     }
   }
@@ -2822,6 +2827,7 @@ const man = require('./lib/manifest');
 const { INTERIOR_STANDARD_LAYOUT_ID } = require('./api/streamline');
 const { RUN_LOCKED, sameOption } = require('./lib/plan');
 const { buildPageContent, linkedPageKeys } = require('./lib/content');
+const { referencedMedia } = require('./lib/links');
 
 class StopRequested extends Error { constructor() { super('Stopped by user'); this.name = 'StopRequested'; } }
 
@@ -2925,7 +2931,7 @@ async function runPlan(plan, ctx) {
   // ---- media ----
   if (media.length) {
     phase('media');
-    await uploadMediaPhase(media, ctx, check, save);
+    await uploadMediaPhase(media, ctx, check, save, plan);
   }
 
   // ---- content ----
@@ -2958,10 +2964,11 @@ async function runPlan(plan, ctx) {
   return man.summary(m);
 }
 
-async function uploadMediaPhase(media, ctx, check, save) {
+async function uploadMediaPhase(media, ctx, check, save, plan) {
   const { api, manifest: m, log, idx, status } = ctx;
   if (!ctx.download) throw new Error('Media upload needs a downloader (GM_xmlhttpRequest in the userscript)');
   let made = 0, failed = 0, n = 0;
+  const retried = new Set(); // failed on an earlier run, uploaded now
   log('  ' + media.length + ' in the plan');
   for (const mid of media) {
     check();
@@ -2985,12 +2992,24 @@ async function uploadMediaPhase(media, ctx, check, save) {
     status('Uploading ' + what);
     const up = await api.uploadMedia({ kind: src.kind, basename: src.fileName || src.url.split('/').pop() || ('media-' + mid), blob, altText: src.alt });
     man.recordMedia(m, mid, { kind: up.kind, streamlineId: up.id, url: up.url, altText: up.altText || '', name: src.name, fileName: src.fileName });
-    if (m.mediaFailures && m.mediaFailures[mid]) delete m.mediaFailures[mid];
+    if (m.mediaFailures && m.mediaFailures[mid]) { delete m.mediaFailures[mid]; retried.add(mid); }
     save();
     made++;
     if (made % 10 === 0) log('  … ' + made + ' uploaded');
   }
   log('  ' + made + ' uploaded, ' + failed + ' could not be downloaded, ' + (media.length - made - failed) + ' already done or skipped');
+  // Pages written while one of these files was missing link to the old site: write them again (same sections) and promote again.
+  if (retried.size) {
+    let again = 0;
+    for (const p of plan.pages) {
+      const rec = m.pages[p.key];
+      if (p.content !== 'content' || !man.pageStageAtLeast(rec, 'content') || rec.contentEmpty) continue;
+      const html = (p.bodyHtml || '') + (p.blocks || []).map(b => b.html).join('') + (p.faqs || []).map(f => f.answerHtml || '').join('');
+      if (referencedMedia(idx, html, p.attachments).some(mid => retried.has(mid))) { man.setPageStage(m, p.key, 'section'); again++; }
+    }
+    save();
+    if (again) log('  ' + again + ' page(s) that use files uploaded this time will be written again');
+  }
 }
 
 // Section ids of a page's blocks after the body (manifests from before 0.9 called them faqSectionIds).
@@ -4121,5 +4140,5 @@ module.exports = { openPanel, setPlatform };
     });
     return module.exports;
   }
-  load('main').start("0.9.0");
+  load('main').start("0.9.1");
 })();

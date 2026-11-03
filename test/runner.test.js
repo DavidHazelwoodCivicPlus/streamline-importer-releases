@@ -216,6 +216,23 @@ test('a failed download is reported and the link stays on the old site', async (
   assert.match(html, /href="https:\/\/www\.old\.gov\/files\/rates\.pdf"/);
 });
 
+test('running again uploads a file that failed before and rewrites the pages that use it, in the same sections', async () => {
+  const { idx, p } = contentSetup();
+  const api = fakeCms(), m = man.newManifest({ host: 'h' });
+  seedExisting(api);
+  await runPlan(p, ctx(api, m, { idx, download: async () => { throw new Error('410'); } }));
+  const before = api.sections.size, promotesBefore = m.pages['page:1'].promoteResult;
+  assert.ok(promotesBefore !== undefined && m.mediaFailures['50']);
+  await runPlan(p, ctx(api, m, { idx, download }));
+  assert.equal(api.media.size, 1);
+  assert.equal(api.sections.size, before, 'no new sections');
+  const html = [...api.sections.values()].find(s => api.pages.get(s.pageId).title === 'Water').html;
+  assert.match(html, /<a href="\/files\/m\d+\/rates\.pdf">Rates<\/a>/);
+  assert.equal(m.pages['page:1'].stage, 'promoted');
+  assert.equal(m.pages['page:2'].stage, 'promoted');
+  assert.deepEqual(m.mediaFailures, {});
+});
+
 test('a page URL pattern set in Options is used instead of looking addresses up', async () => {
   const { idx, p } = contentSetup({ pageUrlPattern: '/p/{slug}' });
   const api = fakeCms();

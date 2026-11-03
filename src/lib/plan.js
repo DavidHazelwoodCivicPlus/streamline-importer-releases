@@ -30,6 +30,7 @@ const DEFAULT_OPTIONS = Object.freeze({
 const RUN_LOCKED = ['menuSource', 'pageContent', 'unpublishedSourceAs', 'includeAttachments', 'includeSections', 'uploadMedia', 'unmatchedRows', 'faqAccordions',
   'embeddedPageCards', 'modules', 'moduleMenu', 'timeZone'];
 const sameOption = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+const RECENT_CARDS = 10; // newest meetings / events shown on their microsite
 
 function normalizeOptions(o) {
   const opts = Object.assign({}, DEFAULT_OPTIONS, o || {});
@@ -180,14 +181,14 @@ function buildPlan(tree, options, idx, exp) {
       }
     }
     // What else belongs to a microsite (D10 og_audience): its staff and FAQs not already carded above, and its
-    // meetings and events (newest first), in pages of 5.
+    // 10 newest meetings and events. The CMS shows every card of a hand-picked card section (it ignores perPage,
+    // sandbox 2026-11-03), so older meetings and events are reached from the Meetings and Events listing pages.
     if (p.sourceType === 'microsite') {
       const carded = new Set(p.cards.flatMap(c => c.keys));
-      for (const [type, title] of [['people', 'Staff'], ['faqs', 'FAQs'], ['meetings', 'Meetings'], ['events', 'Events']]) {
+      for (const [type, title, max] of [['people', 'Staff', 0], ['faqs', 'FAQs', 0], ['meetings', 'Meetings', RECENT_CARDS], ['events', 'Events', RECENT_CARDS]]) {
         let list = (entriesByType[type] || []).filter(e => e.micrositeIds.includes(p.nid) && !carded.has(e.key));
         if (type === 'people') list = list.slice().sort((a, b) => a.weight - b.weight);
-        const found = list.map(e => e.key);
-        gutter(p, title, found, Math.min(found.length, 5) || 3);
+        gutter(p, title, list.map(e => e.key).slice(0, max || undefined));
       }
     }
   }

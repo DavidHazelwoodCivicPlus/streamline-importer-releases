@@ -13,6 +13,7 @@ const man = require('./lib/manifest');
 const { INTERIOR_STANDARD_LAYOUT_ID } = require('./api/streamline');
 const { RUN_LOCKED, sameOption } = require('./lib/plan');
 const { buildPageContent, linkedPageKeys } = require('./lib/content');
+const { referencedMedia } = require('./lib/links');
 
 class StopRequested extends Error { constructor() { super('Stopped by user'); this.name = 'StopRequested'; } }
 
@@ -116,7 +117,7 @@ async function runPlan(plan, ctx) {
   // ---- media ----
   if (media.length) {
     phase('media');
-    await uploadMediaPhase(media, ctx, check, save);
+    await uploadMediaPhase(media, ctx, check, save, plan);
   }
 
   // ---- content ----
@@ -149,10 +150,11 @@ async function runPlan(plan, ctx) {
   return man.summary(m);
 }
 
-async function uploadMediaPhase(media, ctx, check, save) {
+async function uploadMediaPhase(media, ctx, check, save, plan) {
   const { api, manifest: m, log, idx, status } = ctx;
   if (!ctx.download) throw new Error('Media upload needs a downloader (GM_xmlhttpRequest in the userscript)');
   let made = 0, failed = 0, n = 0;
+  const retried = new Set(); // failed on an earlier run, uploaded now
   log('  ' + media.length + ' in the plan');
   for (const mid of media) {
     check();
@@ -176,12 +178,24 @@ async function uploadMediaPhase(media, ctx, check, save) {
     status('Uploading ' + what);
     const up = await api.uploadMedia({ kind: src.kind, basename: src.fileName || src.url.split('/').pop() || ('media-' + mid), blob, altText: src.alt });
     man.recordMedia(m, mid, { kind: up.kind, streamlineId: up.id, url: up.url, altText: up.altText || '', name: src.name, fileName: src.fileName });
-    if (m.mediaFailures && m.mediaFailures[mid]) delete m.mediaFailures[mid];
+    if (m.mediaFailures && m.mediaFailures[mid]) { delete m.mediaFailures[mid]; retried.add(mid); }
     save();
     made++;
     if (made % 10 === 0) log('  … ' + made + ' uploaded');
   }
   log('  ' + made + ' uploaded, ' + failed + ' could not be downloaded, ' + (media.length - made - failed) + ' already done or skipped');
+  // Pages written while one of these files was missing link to the old site: write them again (same sections) and promote again.
+  if (retried.size) {
+    let again = 0;
+    for (const p of plan.pages) {
+      const rec = m.pages[p.key];
+      if (p.content !== 'content' || !man.pageStageAtLeast(rec, 'content') || rec.contentEmpty) continue;
+      const html = (p.bodyHtml || '') + (p.blocks || []).map(b => b.html).join('') + (p.faqs || []).map(f => f.answerHtml || '').join('');
+      if (referencedMedia(idx, html, p.attachments).some(mid => retried.has(mid))) { man.setPageStage(m, p.key, 'section'); again++; }
+    }
+    save();
+    if (again) log('  ' + again + ' page(s) that use files uploaded this time will be written again');
+  }
 }
 
 // Section ids of a page's blocks after the body (manifests from before 0.9 called them faqSectionIds).

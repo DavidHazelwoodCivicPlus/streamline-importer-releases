@@ -120,3 +120,23 @@ test('a meeting title carries its date in the site time zone, like its When line
   assert.equal(moduleEntries(exp, 'meetings', { timeZone: 'Asia/Tokyo' })[0].title, 'Park Board – January 4, 2024');
   assert.equal(moduleEntries(exp, 'meetings', { timeZone: 'America/Chicago' })[0].title, 'Park Board – January 3, 2024');
 });
+
+test('a microsite lists only its 10 newest meetings; the rest are on the Meetings listing page', () => {
+  const exp = site();
+  const base = exp.raw.meetings[0];
+  exp.raw.meetings = Array.from({ length: 14 }, (_, i) => Object.assign({}, base, { entity_id: String(900 + i),
+    fields: Object.assign({}, base.fields, { field_smart_date: [{ value: String(1704322800 + i * 86400) }] }) }));
+  const { p } = plan({ modules: ALL }, exp);
+  const ms = p.pages.find(x => x.title === 'Parks Department');
+  const meet = ms.cards.find(c => c.title === 'Meetings');
+  assert.equal(meet.keys.length, 10);
+  assert.equal(meet.keys[0], 'meetings:913', 'newest first');
+  assert.equal(p.pages.find(x => x.key === 'list:meetings').cards[0].keys.length, 14);
+});
+
+test('a meeting short description that repeats the body is shown once', () => {
+  const exp = site();
+  Object.assign(exp.raw.meetings[0].fields, { body: v('<p>Regular meeting.</p>'), field_short_description: v('Regular meeting.') });
+  const meet = moduleEntries(exp, 'meetings', {})[0];
+  assert.equal((meet.bodyHtml.match(/Regular meeting\./g) || []).length, 1);
+});
