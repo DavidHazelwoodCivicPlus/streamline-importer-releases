@@ -30,7 +30,7 @@ test('the sample plan makes menus, sections, cards and uploads, with every link 
   // Every sample file and image is uploaded; the video is listed too but stays a link (the upload skips videos).
   assert.deepEqual(p.media.map(Number).sort(), s.SAMPLE_MEDIA.map(m => m.mid).sort());
   assert.equal(p.menu.filter(m => m.title === 'Events').length, 1, 'the Events microsite is the events listing');
-  assert.ok(p.pages.some(x => x.unpublished), 'an unpublished page');
+  assert.ok(p.pages.some(x => !x.sourcePublished && !x.unpublished), 'a page unpublished in D10, imported published by default');
   assert.ok(p.pages.some(x => x.blocks.some(b => b.accordion)), 'an accordion section');
   for (const kind of ['text', 'image_text', 'files', 'slideshow']) assert.ok(p.pages.some(x => x.blocks.some(b => b.kind === kind)), kind + ' section');
   assert.ok(p.pages.some(x => x.cards.some(c => c.column === 'gutter')), 'right-column cards');

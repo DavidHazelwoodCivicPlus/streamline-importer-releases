@@ -10,7 +10,7 @@ const { sectionBlocks, primaryMediaHtml } = require('./sections');
 const DEFAULT_OPTIONS = Object.freeze({
   menuSource: 'd10',            // 'd10' | 'workbook'
   pageContent: 'empty',         // 'empty' | 'content' (D10 body converted to freeform content)
-  unpublishedSourceAs: 'unpublished', // how to import pages that are unpublished in D10: 'unpublished' | 'published'
+  unpublishedSourceAs: 'published', // how to import pages that are unpublished in D10: 'unpublished' | 'published'
   includeEmptyMicrosites: false,
   includeAttachments: true,     // content mode: list a page's file attachments under a "Documents" heading
   includeSections: true,        // content mode: text, image + text, files and slideshow sections, and the primary image

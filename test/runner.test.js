@@ -58,7 +58,7 @@ test('full run creates every page and menu item, linked and ordered', async () =
   const kids = [...api.items.values()].filter(i => i.parent_id === util.id).sort((a, b) => a.weight - b.weight);
   assert.deepEqual(kids.map(k => k.title), ['Alerts', 'billing', 'Water']);
   for (const k of kids) assert.equal(api.pages.get(k.poc_id).title, k.title);
-  assert.equal([...api.pages.values()].find(x => x.title === 'Alerts').unpublished, true);
+  assert.equal([...api.pages.values()].find(x => x.title === 'Alerts').unpublished, false, 'unpublished in D10, imported published by default');
 });
 
 test('a run that fails partway resumes without duplicates', async () => {
@@ -245,7 +245,7 @@ test('a page URL pattern set in Options is used instead of looking addresses up'
 test('resume refuses different run options', async () => {
   const api = fakeCms(), m = man.newManifest({ host: 'h' });
   await runPlan(plan(), ctx(api, m));
-  const other = buildPlan(buildNavFromD10(d10.loadExport(exportFiles())).tree, { unpublishedSourceAs: 'published' });
+  const other = buildPlan(buildNavFromD10(d10.loadExport(exportFiles())).tree, { unpublishedSourceAs: 'unpublished' });
   await assert.rejects(runPlan(other, ctx(api, m)), /different options \(unpublishedSourceAs\)/);
 });
 

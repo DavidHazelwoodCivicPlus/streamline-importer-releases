@@ -50,18 +50,13 @@ function saveFile(text, name, type) {
 const saveCsv = (cols, rows, name) => saveFile(toCsv(cols, rows), name, 'text/csv;charset=utf-8');
 const stamp = () => new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
 
-// Anywhere but the test sandbox, actions that change the CMS ask for the site's address to be typed,
-// so a run cannot land on the wrong client's site by a stray click.
+// Undo and "remove all" ask once (OK/Cancel). Only erasing the whole site asks for its address to be typed.
 const isSandbox = () => location.host === SANDBOX_HOST;
-function confirmChange(message) {
-  if (isSandbox()) return confirm(message);
-  const typed = prompt(message + '\n\nThis is a live site. Type ' + location.host + ' to confirm.');
-  return typed != null && typed.trim().toLowerCase() === location.host.toLowerCase();
-}
+const confirmChange = message => confirm(message + (isSandbox() ? '' : '\n\nSite: ' + location.host));
 function siteBanner() {
   const b = h('div', '', 'border-radius:4px;padding:8px 10px;margin:0 0 8px;font-size:13px;font-weight:600;' +
     (isSandbox() ? 'background:#eef6ee;color:#225522;' : 'background:#fdecea;color:' + RED + ';border:1px solid #e0b4b4;'));
-  b.textContent = isSandbox() ? 'Site: ' + location.host + ' (test sandbox)' : 'Live site: ' + location.host + '. Changes here are real; running, undoing and removing ask you to type this address.';
+  b.textContent = isSandbox() ? 'Site: ' + location.host + ' (test sandbox)' : 'Live site: ' + location.host + '. Changes here are real.';
   return b;
 }
 
@@ -403,8 +398,8 @@ function openPanel() {
 
       body.appendChild(heading('Pages that are unpublished in D10'));
       body.appendChild(radio('si-unpub', [
-        { value: 'unpublished', label: 'Import them as unpublished' },
-        { value: 'published', label: 'Import them as published' }
+        { value: 'published', label: 'Import them as published' },
+        { value: 'unpublished', label: 'Import them as unpublished' }
       ], o.unpublishedSourceAs, v => { o.unpublishedSourceAs = v; }));
       body.appendChild(note('Pages published in D10 are always imported as published.'));
 
@@ -551,19 +546,7 @@ function openPanel() {
     panel.appendChild(ul);
     panel.appendChild(h('p', 'Existing menu items and pages are left alone. Everything created is recorded in a manifest (saved in this browser after every step) so the run can be resumed or undone.', 'font-size:13px;color:#555;'));
     const foot = h('div', '', 'margin-top:14px;');
-    const go = btn('Confirm and run', () => viewProgress('run'), true);
-    if (!isSandbox()) {
-      // Live site: the button stays off until the site's address is typed.
-      const row = h('label', '', 'display:block;margin:10px 0 0;font-size:13px;');
-      row.appendChild(document.createTextNode('Type ' + location.host + ' to confirm: '));
-      const typed = document.createElement('input'); typed.type = 'text'; typed.style.cssText = 'width:300px;';
-      const sync = () => { const ok = typed.value.trim().toLowerCase() === location.host.toLowerCase(); go.disabled = !ok; go.style.opacity = ok ? '1' : '.4'; };
-      typed.oninput = sync;
-      row.appendChild(typed);
-      panel.appendChild(row);
-      sync();
-    }
-    foot.appendChild(go);
+    foot.appendChild(btn('Confirm and run', () => viewProgress('run'), true));
     foot.appendChild(btn('Back', viewPreview));
     panel.appendChild(foot);
   }

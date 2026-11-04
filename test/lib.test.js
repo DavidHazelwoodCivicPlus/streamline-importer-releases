@@ -75,10 +75,10 @@ test('plan: parents first, weights are sibling order, unpublished option applied
   assert.equal(plan.pages[0].key, 'microsite:20');
   const idx = k => plan.menu.findIndex(m => m.key === k);
   for (const m of plan.menu) if (m.parentKey) assert.ok(idx(m.parentKey) < idx(m.key), m.key + ' after its parent');
-  const alerts = plan.pages.find(p => p.nid === '103');
-  assert.equal(alerts.unpublished, true);
-  const asPub = buildPlan(nav.tree, { unpublishedSourceAs: 'published' }).pages.find(p => p.nid === '103');
-  assert.equal(asPub.unpublished, false);
+  // Pages unpublished in D10 are imported published unless asked otherwise.
+  assert.equal(plan.pages.find(p => p.nid === '103').unpublished, false);
+  const asUnpub = buildPlan(nav.tree, { unpublishedSourceAs: 'unpublished' }).pages.find(p => p.nid === '103');
+  assert.equal(asUnpub.unpublished, true);
   const water = plan.menu.find(m => m.pageKey === 'page:101');
   assert.equal(water.parentKey, 'menu:microsite:10');
   assert.equal(water.weight, 2);

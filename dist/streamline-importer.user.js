@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Drupal 10 to Streamline Importer
 // @namespace    civicplus.streamline.d10importer
-// @version      0.10.1
+// @version      0.10.2
 // @description  Create Streamline pages and the primary menu from a Drupal 10 export (www-*.json). Runs only on the Streamline sites you turn it on for (Tampermonkey menu).
 // @match        https://*/*
 // @resource     xlsx https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js
@@ -17,7 +17,7 @@
 // @updateURL    https://raw.githubusercontent.com/DavidHazelwoodCivicPlus/streamline-importer-releases/main/dist/streamline-importer.meta.js
 // @downloadURL  https://raw.githubusercontent.com/DavidHazelwoodCivicPlus/streamline-importer-releases/main/dist/streamline-importer.user.js
 // ==/UserScript==
-// Built 2026-11-04T22:14:25.735Z. Do not edit; edit src/ and run "npm run build".
+// Built 2026-11-04T22:45:39.245Z. Do not edit; edit src/ and run "npm run build".
 
 (function () {
   'use strict';
@@ -2101,7 +2101,7 @@ const { sectionBlocks, primaryMediaHtml } = require('./sections');
 const DEFAULT_OPTIONS = Object.freeze({
   menuSource: 'd10',            // 'd10' | 'workbook'
   pageContent: 'empty',         // 'empty' | 'content' (D10 body converted to freeform content)
-  unpublishedSourceAs: 'unpublished', // how to import pages that are unpublished in D10: 'unpublished' | 'published'
+  unpublishedSourceAs: 'published', // how to import pages that are unpublished in D10: 'unpublished' | 'published'
   includeEmptyMicrosites: false,
   includeAttachments: true,     // content mode: list a page's file attachments under a "Documents" heading
   includeSections: true,        // content mode: text, image + text, files and slideshow sections, and the primary image
@@ -2580,7 +2580,7 @@ function sampleExport(now) {
         files('Reports', 5101, 5102)
       ]
     }),
-    pg(1104, 110, 'Holiday Schedule (draft)', { body: v('<p>This page is unpublished in D10, so it is imported unpublished.</p>') }, false),
+    pg(1104, 110, 'Holiday Schedule (draft)', { body: v('<p>This page is unpublished in D10. It is imported published unless Options → "Pages that are unpublished in D10" says otherwise.</p>') }, false),
     // ---- Parks & Recreation ----
     pg(1201, 120, 'Riverside Park', {
       body: v('<p>Riverside Park sits on 40 acres along the river, with a splash pad, picnic shelters and the start of the river trail.</p>'),
@@ -3879,18 +3879,13 @@ function saveFile(text, name, type) {
 const saveCsv = (cols, rows, name) => saveFile(toCsv(cols, rows), name, 'text/csv;charset=utf-8');
 const stamp = () => new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
 
-// Anywhere but the test sandbox, actions that change the CMS ask for the site's address to be typed,
-// so a run cannot land on the wrong client's site by a stray click.
+// Undo and "remove all" ask once (OK/Cancel). Only erasing the whole site asks for its address to be typed.
 const isSandbox = () => location.host === SANDBOX_HOST;
-function confirmChange(message) {
-  if (isSandbox()) return confirm(message);
-  const typed = prompt(message + '\n\nThis is a live site. Type ' + location.host + ' to confirm.');
-  return typed != null && typed.trim().toLowerCase() === location.host.toLowerCase();
-}
+const confirmChange = message => confirm(message + (isSandbox() ? '' : '\n\nSite: ' + location.host));
 function siteBanner() {
   const b = h('div', '', 'border-radius:4px;padding:8px 10px;margin:0 0 8px;font-size:13px;font-weight:600;' +
     (isSandbox() ? 'background:#eef6ee;color:#225522;' : 'background:#fdecea;color:' + RED + ';border:1px solid #e0b4b4;'));
-  b.textContent = isSandbox() ? 'Site: ' + location.host + ' (test sandbox)' : 'Live site: ' + location.host + '. Changes here are real; running, undoing and removing ask you to type this address.';
+  b.textContent = isSandbox() ? 'Site: ' + location.host + ' (test sandbox)' : 'Live site: ' + location.host + '. Changes here are real.';
   return b;
 }
 
@@ -4232,8 +4227,8 @@ function openPanel() {
 
       body.appendChild(heading('Pages that are unpublished in D10'));
       body.appendChild(radio('si-unpub', [
-        { value: 'unpublished', label: 'Import them as unpublished' },
-        { value: 'published', label: 'Import them as published' }
+        { value: 'published', label: 'Import them as published' },
+        { value: 'unpublished', label: 'Import them as unpublished' }
       ], o.unpublishedSourceAs, v => { o.unpublishedSourceAs = v; }));
       body.appendChild(note('Pages published in D10 are always imported as published.'));
 
@@ -4380,19 +4375,7 @@ function openPanel() {
     panel.appendChild(ul);
     panel.appendChild(h('p', 'Existing menu items and pages are left alone. Everything created is recorded in a manifest (saved in this browser after every step) so the run can be resumed or undone.', 'font-size:13px;color:#555;'));
     const foot = h('div', '', 'margin-top:14px;');
-    const go = btn('Confirm and run', () => viewProgress('run'), true);
-    if (!isSandbox()) {
-      // Live site: the button stays off until the site's address is typed.
-      const row = h('label', '', 'display:block;margin:10px 0 0;font-size:13px;');
-      row.appendChild(document.createTextNode('Type ' + location.host + ' to confirm: '));
-      const typed = document.createElement('input'); typed.type = 'text'; typed.style.cssText = 'width:300px;';
-      const sync = () => { const ok = typed.value.trim().toLowerCase() === location.host.toLowerCase(); go.disabled = !ok; go.style.opacity = ok ? '1' : '.4'; };
-      typed.oninput = sync;
-      row.appendChild(typed);
-      panel.appendChild(row);
-      sync();
-    }
-    foot.appendChild(go);
+    foot.appendChild(btn('Confirm and run', () => viewProgress('run'), true));
     foot.appendChild(btn('Back', viewPreview));
     panel.appendChild(foot);
   }
@@ -4658,5 +4641,5 @@ module.exports = { sampleFile };
     });
     return module.exports;
   }
-  load('main').start("0.10.1");
+  load('main').start("0.10.2");
 })();

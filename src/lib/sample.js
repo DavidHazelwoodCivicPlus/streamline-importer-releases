@@ -132,7 +132,7 @@ function sampleExport(now) {
         files('Reports', 5101, 5102)
       ]
     }),
-    pg(1104, 110, 'Holiday Schedule (draft)', { body: v('<p>This page is unpublished in D10, so it is imported unpublished.</p>') }, false),
+    pg(1104, 110, 'Holiday Schedule (draft)', { body: v('<p>This page is unpublished in D10. It is imported published unless Options → "Pages that are unpublished in D10" says otherwise.</p>') }, false),
     // ---- Parks & Recreation ----
     pg(1201, 120, 'Riverside Park', {
       body: v('<p>Riverside Park sits on 40 acres along the river, with a splash pad, picnic shelters and the start of the river trail.</p>'),

@@ -4,7 +4,7 @@ Tampermonkey userscript that migrates a Drupal 10 site into Streamline CMS (Ampl
 
 It creates pages (empty, or with their converted D10 body), the primary menu linked to them, uploads the files and images those pages link to, and points `/node/N` and `/media/N` links at the new pages and files. Page sections (text, image + text, files, slideshows) and primary images come over under the body. Meetings, events, staff, FAQs and the other module records become pages of their own, linked from the right column of the pages that showed them in D10.
 
-Runs only on the Streamline sites you turn it on for. Tampermonkey loads it on every https page, but on any site not in your list it does nothing at all (no button, no timers). The test sandbox is on by default. On any site other than the test sandbox (davidhazelwoodcpsandbox.specialdistrict.org), running, undoing and removing ask you to type the site's address first. The dev tools in `tools/` only ever talk to the sandbox.
+Runs only on the Streamline sites you turn it on for. Tampermonkey loads it on every https page, but on any site not in your list it does nothing at all (no button, no timers). The test sandbox is on by default. Running and undoing ask only for a click to confirm; erasing a whole site asks you to type WIPE and the site's address. The dev tools in `tools/` only ever talk to the sandbox.
 
 ## Install (once per person)
 
@@ -27,7 +27,7 @@ The releases repo is public. It gets every tracked file except the Streamline AP
 1. Sign in to the site's CMS (turned on for this site, see Install). **D10 Importer** appears in the dock above Support: an import icon (a page with an arrow) when the dock is collapsed, with its label when it expands. If the dock's items cannot be copied, a plain button appears under the menu instead.
 2. Open it. A banner names the site (green for the sandbox, red for a live site). Tampermonkey asks once to allow downloads from the old site the first time media is uploaded.
 3. **Load:** the folder with the `www-*.json` files. Optionally a site-map workbook and an override CSV. Or **Use the sample site**: a made-up town (Town of Maple Grove) that uses everything the importer handles (menus, pages with text, images, files and links between them, every kind of page section, every module type, right-column cards, an unpublished page, a microsite named like a listing). Import it to see what the tool makes, then remove it with **Undo last import**. Its images and PDFs are made in the browser, so nothing is downloaded.
-4. **Options:** menu source (D10 data or site map), empty pages or pages with content, attachments, media upload, page URL pattern, unpublished pages, test-run limit.
+4. **Options:** menu source (D10 data or site map), empty pages or pages with content, attachments, media upload, page URL pattern, pages unpublished in D10 (imported published by default), test-run limit.
 5. **Preview:** a dry run with no writes. Menu tree, counts, a content preview of any page, and reports: dry run, match (site map), skipped, links, media, FAQs, not imported, warnings.
 6. **Run:** pages → menu items → media → content → promote drafts. Every create is saved to a manifest in this browser right away.
 

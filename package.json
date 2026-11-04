@@ -1,6 +1,6 @@
 {
   "name": "streamline-importer",
-  "version": "0.10.1",
+  "version": "0.10.2",
   "private": true,
   "description": "D10 to Streamline CMS importer (Tampermonkey userscript)",
   "releaseRepo": {
