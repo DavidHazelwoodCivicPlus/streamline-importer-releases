@@ -408,9 +408,6 @@ function openPanel() {
       ], o.unpublishedSourceAs, v => { o.unpublishedSourceAs = v; }));
       body.appendChild(note('Pages published in D10 are always imported as published.'));
 
-      body.appendChild(heading('News and events'));
-      body.appendChild(radio('si-news', [{ value: 'skip', label: 'Skip them (listed in the skipped and out-of-scope reports)' }], 'skip', () => {}));
-
       body.appendChild(heading('Test run'));
       const limRow = h('label', '', 'display:block;margin:8px 0;');
       limRow.appendChild(document.createTextNode('Only the first '));
@@ -473,7 +470,7 @@ function openPanel() {
       lines.push('Site map rows: matched by URL ' + c.url + ', by title ' + c.title + ', by override ' + c.override + ' · unmatched ' + c.unmatched + ' · ambiguous ' + c.ambiguous + ' · news/events ' + c.notPage + (c.skipped ? ' · skipped ' + c.skipped : '') + '.');
       lines.push('Menu order follows the site map.');
     } else {
-      lines.push('Skipped: ' + state.nav.skipped.length + ' (news, events, Home microsites' + (o.includeEmptyMicrosites ? '' : ', microsites with no pages') + ').');
+      lines.push('Not in the menu: ' + state.nav.skipped.length + ' (news items and events, which get their own pages under Module content; the Home microsite' + (o.includeEmptyMicrosites ? '' : '; microsites with no pages') + ').');
       lines.push('Menu order is alphabetical: the D10 export has no menu order.');
     }
     if (o.limit) lines.push('Test run: limited to the first ' + o.limit + ' pages.');

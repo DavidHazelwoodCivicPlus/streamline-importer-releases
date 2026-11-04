@@ -88,7 +88,6 @@ test('plan: parents first, weights are sibling order, unpublished option applied
 test('plan options: unknown values are refused, empty mode turns media off', () => {
   assert.throws(() => normalizeOptions({ pageContent: 'full' }), /Unknown page content/);
   assert.throws(() => normalizeOptions({ menuSource: 'xml' }), /Unknown menu source/);
-  assert.throws(() => normalizeOptions({ newsEvents: 'import' }), /skipped/);
   assert.throws(() => normalizeOptions({ pageUrlPattern: '/pages/' }), /\{slug\}/);
   assert.equal(normalizeOptions({ pageContent: 'empty', uploadMedia: true }).uploadMedia, false);
   assert.equal(normalizeOptions({ pageContent: 'content' }).uploadMedia, true);

@@ -11,7 +11,6 @@ const DEFAULT_OPTIONS = Object.freeze({
   menuSource: 'd10',            // 'd10' | 'workbook'
   pageContent: 'empty',         // 'empty' | 'content' (D10 body converted to freeform content)
   unpublishedSourceAs: 'unpublished', // how to import pages that are unpublished in D10: 'unpublished' | 'published'
-  newsEvents: 'skip',           // news and events never become menu pages (news can be imported as a module)
   includeEmptyMicrosites: false,
   includeAttachments: true,     // content mode: list a page's file attachments under a "Documents" heading
   includeSections: true,        // content mode: text, image + text, files and slideshow sections, and the primary image
@@ -37,7 +36,7 @@ function normalizeOptions(o) {
   if (!['d10', 'workbook'].includes(opts.menuSource)) throw new Error('Unknown menu source "' + opts.menuSource + '"');
   if (!['empty', 'content'].includes(opts.pageContent)) throw new Error('Unknown page content "' + opts.pageContent + '"');
   if (!['unpublished', 'published'].includes(opts.unpublishedSourceAs)) throw new Error('Bad unpublishedSourceAs: ' + opts.unpublishedSourceAs);
-  if (opts.newsEvents !== 'skip') throw new Error('News and events can only be skipped for now');
+  delete opts.newsEvents; // from versions before 0.10.1, which had a "News and events: skip" option
   if (opts.pageUrlPattern !== 'auto' && !/\{slug\}/.test(opts.pageUrlPattern)) throw new Error('Page URL pattern must contain {slug}, e.g. /{slug}');
   opts.limit = Math.max(0, parseInt(opts.limit, 10) || 0);
   for (const k of ['includeEmptyMicrosites', 'includeAttachments', 'includeSections', 'uploadMedia', 'faqAccordions', 'embeddedPageCards', 'moduleMenu']) opts[k] = !!opts[k];

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Drupal 10 to Streamline Importer
 // @namespace    civicplus.streamline.d10importer
-// @version      0.10.0
+// @version      0.10.1
 // @description  Create Streamline pages and the primary menu from a Drupal 10 export (www-*.json). Runs only on the Streamline sites you turn it on for (Tampermonkey menu).
 // @match        https://*/*
 // @resource     xlsx https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js
@@ -17,7 +17,7 @@
 // @updateURL    https://raw.githubusercontent.com/DavidHazelwoodCivicPlus/streamline-importer-releases/main/dist/streamline-importer.meta.js
 // @downloadURL  https://raw.githubusercontent.com/DavidHazelwoodCivicPlus/streamline-importer-releases/main/dist/streamline-importer.user.js
 // ==/UserScript==
-// Built 2026-11-04T21:42:03.778Z. Do not edit; edit src/ and run "npm run build".
+// Built 2026-11-04T22:14:25.735Z. Do not edit; edit src/ and run "npm run build".
 
 (function () {
   'use strict';
@@ -2102,7 +2102,6 @@ const DEFAULT_OPTIONS = Object.freeze({
   menuSource: 'd10',            // 'd10' | 'workbook'
   pageContent: 'empty',         // 'empty' | 'content' (D10 body converted to freeform content)
   unpublishedSourceAs: 'unpublished', // how to import pages that are unpublished in D10: 'unpublished' | 'published'
-  newsEvents: 'skip',           // news and events never become menu pages (news can be imported as a module)
   includeEmptyMicrosites: false,
   includeAttachments: true,     // content mode: list a page's file attachments under a "Documents" heading
   includeSections: true,        // content mode: text, image + text, files and slideshow sections, and the primary image
@@ -2128,7 +2127,7 @@ function normalizeOptions(o) {
   if (!['d10', 'workbook'].includes(opts.menuSource)) throw new Error('Unknown menu source "' + opts.menuSource + '"');
   if (!['empty', 'content'].includes(opts.pageContent)) throw new Error('Unknown page content "' + opts.pageContent + '"');
   if (!['unpublished', 'published'].includes(opts.unpublishedSourceAs)) throw new Error('Bad unpublishedSourceAs: ' + opts.unpublishedSourceAs);
-  if (opts.newsEvents !== 'skip') throw new Error('News and events can only be skipped for now');
+  delete opts.newsEvents; // from versions before 0.10.1, which had a "News and events: skip" option
   if (opts.pageUrlPattern !== 'auto' && !/\{slug\}/.test(opts.pageUrlPattern)) throw new Error('Page URL pattern must contain {slug}, e.g. /{slug}');
   opts.limit = Math.max(0, parseInt(opts.limit, 10) || 0);
   for (const k of ['includeEmptyMicrosites', 'includeAttachments', 'includeSections', 'uploadMedia', 'faqAccordions', 'embeddedPageCards', 'moduleMenu']) opts[k] = !!opts[k];
@@ -4238,9 +4237,6 @@ function openPanel() {
       ], o.unpublishedSourceAs, v => { o.unpublishedSourceAs = v; }));
       body.appendChild(note('Pages published in D10 are always imported as published.'));
 
-      body.appendChild(heading('News and events'));
-      body.appendChild(radio('si-news', [{ value: 'skip', label: 'Skip them (listed in the skipped and out-of-scope reports)' }], 'skip', () => {}));
-
       body.appendChild(heading('Test run'));
       const limRow = h('label', '', 'display:block;margin:8px 0;');
       limRow.appendChild(document.createTextNode('Only the first '));
@@ -4303,7 +4299,7 @@ function openPanel() {
       lines.push('Site map rows: matched by URL ' + c.url + ', by title ' + c.title + ', by override ' + c.override + ' · unmatched ' + c.unmatched + ' · ambiguous ' + c.ambiguous + ' · news/events ' + c.notPage + (c.skipped ? ' · skipped ' + c.skipped : '') + '.');
       lines.push('Menu order follows the site map.');
     } else {
-      lines.push('Skipped: ' + state.nav.skipped.length + ' (news, events, Home microsites' + (o.includeEmptyMicrosites ? '' : ', microsites with no pages') + ').');
+      lines.push('Not in the menu: ' + state.nav.skipped.length + ' (news items and events, which get their own pages under Module content; the Home microsite' + (o.includeEmptyMicrosites ? '' : '; microsites with no pages') + ').');
       lines.push('Menu order is alphabetical: the D10 export has no menu order.');
     }
     if (o.limit) lines.push('Test run: limited to the first ' + o.limit + ' pages.');
@@ -4662,5 +4658,5 @@ module.exports = { sampleFile };
     });
     return module.exports;
   }
-  load('main').start("0.10.0");
+  load('main').start("0.10.1");
 })();
