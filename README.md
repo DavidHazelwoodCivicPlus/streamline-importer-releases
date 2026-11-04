@@ -26,14 +26,14 @@ The releases repo is public. It gets every tracked file except the Streamline AP
 
 1. Sign in to the site's CMS (turned on for this site, see Install). **D10 Importer** appears in the dock above Support: an import icon (a page with an arrow) when the dock is collapsed, with its label when it expands. If the dock's items cannot be copied, a plain button appears under the menu instead.
 2. Open it. A banner names the site (green for the sandbox, red for a live site). Tampermonkey asks once to allow downloads from the old site the first time media is uploaded.
-3. **Load:** the folder with the `www-*.json` files. Optionally a site-map workbook and an override CSV.
+3. **Load:** the folder with the `www-*.json` files. Optionally a site-map workbook and an override CSV. Or **Use the sample site**: a made-up town (Town of Maple Grove) that uses everything the importer handles (menus, pages with text, images, files and links between them, every kind of page section, every module type, right-column cards, an unpublished page, a microsite named like a listing). Import it to see what the tool makes, then remove it with **Undo last import**. Its images and PDFs are made in the browser, so nothing is downloaded.
 4. **Options:** menu source (D10 data or site map), empty pages or pages with content, attachments, media upload, page URL pattern, unpublished pages, test-run limit.
 5. **Preview:** a dry run with no writes. Menu tree, counts, a content preview of any page, and reports: dry run, match (site map), skipped, links, media, FAQs, not imported, warnings.
 6. **Run:** pages → menu items → media → content → promote drafts. Every create is saved to a manifest in this browser right away.
 
 **Erase this site** ("Resume, undo, other actions", for test sites): deletes every menu item in every menu and every page (events, meetings and groups too) whoever made them, and optionally every uploaded file and image. The homepage, products, forms, users and settings stay. Type `WIPE <site address>` to unlock it; a list of everything deleted downloads first. Deleted pages cannot be brought back.
 
-**Resume:** load the same files and run again with the same options; only what is missing is created. **Undo:** "Resume, undo, other actions" → Undo this run removes exactly what the manifest lists (menu items, pages, uploaded media). The manifest can be downloaded and loaded in another browser.
+**Imports and undo:** each export you run is its own import with its own manifest, so a site can be built in batches. Running the same export again continues its import (resume, and retry of files that failed) instead of starting a new one; exports are told apart by folder name (or by the old site address when files are chosen without their folder). **Undo last import** (first screen, or "Resume, undo, other actions") removes exactly what the newest import made: its menu items, pages and uploaded media. Any other import can be undone on its own from the same list. Each manifest can be downloaded and loaded in another browser. Erasing the site clears the list.
 
 ## Menu from D10 data
 
@@ -57,7 +57,9 @@ The releases repo is public. It gets every tracked file except the Streamline AP
 ## Module content and link cards
 
 - **Modules (Options → Module content):** news, business directory, jobs, bids & RFPs, ordinances & resolutions, parks, projects and locations. Each record becomes a page: its details (status, dates, address, amenities…), its body and a Documents list. Each module gets a listing page that shows its entries as cards (news newest first, the rest A–Z), with an optional primary menu item. Date-times are stored in UTC by D10 and shown in the **Site time zone** set in Options. **Meetings, events, Staff Directory and FAQs** have no Streamline module pages can use yet, so they are pages too: meetings with date, location, agenda, packet, minutes and video links; events with dates and location; people with photo, position, email, phone and office hours. Everything is ticked by default. Meeting titles get their date ("Planning and Zoning Board – January 3, 2024").
-- **Floating pages:** module entries never get a menu item. They are reached from their listing page and from the right column of the pages D10 showed them on: a staff section ("Board Members") lists those people, an FAQ section its category's FAQs, and each microsite page lists its own staff and FAQs not already shown, and its 10 newest meetings and events (Streamline shows every card in a right-column section, so older ones are on the Meetings and Events listing pages). Streamline adds a "This item appears on" box to each floating page, linking back to those pages.
+- **Order of events and meetings:** upcoming ones first, soonest first (a recurring event by its next date), then past ones, most recent first. The order is set when the import runs; Streamline does not re-sort the cards later.
+- **A microsite named like a listing** (for example a D10 "Events" microsite) becomes that listing: the cards for every entry go under its own content, and no second "Events" menu item is added.
+- **Floating pages:** module entries never get a menu item. They are reached from their listing page and from the right column of the pages D10 showed them on: a staff section ("Board Members") lists those people, an FAQ section its category's FAQs, and each microsite page lists its own staff and FAQs not already shown, and 10 of its meetings and events (Streamline shows every card in a right-column section, so the rest are on the Meetings and Events listing pages). Streamline adds a "This item appears on" box to each floating page, linking back to those pages.
 - **Failed downloads:** running the import again retries files that could not be downloaded, and rewrites (and promotes again) the pages that use the ones that now upload.
 - **Right-column cards:** D10 "embedded pages" sections become a Teasers section in the page's right column, titled with the section heading, with one card per linked page in D10 order. Cards use the square card style (cards, three_column, light3, centered) and never the button link, which does not show on the public page. Links that cannot become cards (page not imported, module not selected, not in the export) are listed in the card report.
 - Streamline's right column accepts only Teasers (link cards) on every layout, so other right-column content (FAQs, text) goes in the main column.
@@ -71,7 +73,7 @@ The releases repo is public. It gets every tracked file except the Streamline AP
 
 | Path | What |
 |---|---|
-| `src/lib/` | Pure logic: D10 loading, menu trees, site map and matching, HTML → Lexical, links, plan, manifest, reports, CSV |
+| `src/lib/` | Pure logic: D10 loading, menu trees, site map and matching, HTML → Lexical, links, plan, manifest, import history, reports, CSV |
 | `src/api/` | HTTP client (throttle, retry 429/5xx, stop on other errors) and Streamline calls |
 | `src/runner.js` | Phases, resume, undo |
 | `src/ui/panel.js` | The wizard |

@@ -54,13 +54,15 @@ function normalizeOptions(o) {
 // tree: [{ key, sourceType, source, title, children }] from navFromD10 or the workbook matcher.
 // source is the D10 page/microsite summary, or null for a workbook row with no D10 match (an empty page).
 // idx: links.buildLinkIndex(exp), needed for media, FAQs and cards. exp: the loaded export, needed for modules.
+// env.now (ms, default now): splits upcoming from past events and meetings for their order. Not an option, so a
+// resume a day later is not refused; only the order of cards depends on it.
 // Returns { options, pages, menu, media, cardIssues }.
 //   pages: one per distinct page key, parents first. Two menu items may point at the same page.
 //          page.cards: [{ column: 'main'|'gutter', title, keys, orderBy, perPage }] = Teaser sections of link cards.
 //   menu:  one per menu item; parentKey is another menu item's key, weight = sibling order.
 //   media: media ids to upload.
 //   cardIssues: embedded-pages links that cannot become cards, with the reason.
-function buildPlan(tree, options, idx, exp) {
+function buildPlan(tree, options, idx, exp, env) {
   const opts = normalizeOptions(options);
   const pages = [], menu = [], seen = new Set(), media = [], cardIssues = [];
   const mediaSet = new Set();
@@ -106,23 +108,38 @@ function buildPlan(tree, options, idx, exp) {
 
   // Modules: a listing page per type (cards for every entry) and a page per entry.
   let topWeight = tree.length;
+  // The menu page (highest in the menu first) whose title is the listing's name, if any.
+  const norm = s => String(s || '').toLowerCase().replace(/&/g, 'and').replace(/[^a-z0-9]+/g, ' ').trim();
+  const listingHost = label => {
+    const m = menu.filter(x => norm(x.title) === norm(label)).sort((a, b) => a.level - b.level)[0];
+    const p = m && pages.find(x => x.key === m.pageKey);
+    return p && !p.listingOf ? p : null;
+  };
   const entriesByType = {};
   for (const type of opts.modules) {
     if (!exp) throw new Error('Module import needs the export');
     const def = MODULES[type];
-    const all = moduleEntries(exp, type, { timeZone: opts.timeZone || 'UTC' });
+    const all = moduleEntries(exp, type, { timeZone: opts.timeZone || 'UTC', now: env && env.now });
     const entries = opts.limit ? all.slice(0, opts.limit) : all; // a test run takes the first few of each module
     entriesByType[type] = entries;
     if (!entries.length) continue; // nothing of this type in the export: no empty listing page
-    const listKey = 'list:' + type;
-    pages.push({
+    const listCards = [{ column: 'main', title: '', keys: entries.map(e => e.key), orderBy: 'manual', perPage: 12 }];
+    // A menu page already named like the listing (a D10 "Events" microsite, say) becomes the listing: its
+    // cards go under its own content, instead of a second menu item with the same name.
+    const host = listingHost(def.label);
+    let listKey = 'list:' + type;
+    if (host) {
+      listKey = host.key;
+      host.listingOf = type;
+      host.cards.push(listCards[0]);
+    } else pages.push({
       key: listKey, title: def.label, sourceType: 'listing', nid: '', alias: '', sourcePublished: true, unpublished: false,
       content: 'empty', hasBody: false, notes: [], bodyHtml: '', attachments: [], faqs: [], blocks: [], sectionWarnings: [], embedded: [], src: null, row: null, moduleType: type,
       // Always manual: with any other order the CMS does not show the cards added to the section (sandbox,
       // 2026-10-29). The entries are already in the module's order (A-Z, news newest first).
-      cards: entries.length ? [{ column: 'main', title: '', keys: entries.map(e => e.key), orderBy: 'manual', perPage: 12 }] : []
+      cards: listCards
     });
-    if (opts.moduleMenu) menu.push({ key: 'menu:' + listKey, pageKey: listKey, parentKey: null, weight: topWeight++, title: def.label, level: 1, path: '', row: null });
+    if (!host && opts.moduleMenu) menu.push({ key: 'menu:' + listKey, pageKey: listKey, parentKey: null, weight: topWeight++, title: def.label, level: 1, path: '', row: null });
     for (const e of entries) {
       const c = contentOf(e);
       const page = {
@@ -186,6 +203,7 @@ function buildPlan(tree, options, idx, exp) {
     if (p.sourceType === 'microsite') {
       const carded = new Set(p.cards.flatMap(c => c.keys));
       for (const [type, title, max] of [['people', 'Staff', 0], ['faqs', 'FAQs', 0], ['meetings', 'Meetings', RECENT_CARDS], ['events', 'Events', RECENT_CARDS]]) {
+        if (p.listingOf === type) continue; // every one is already in this page's listing
         let list = (entriesByType[type] || []).filter(e => e.micrositeIds.includes(p.nid) && !carded.has(e.key));
         if (type === 'people') list = list.slice().sort((a, b) => a.weight - b.weight);
         gutter(p, title, list.map(e => e.key).slice(0, max || undefined));

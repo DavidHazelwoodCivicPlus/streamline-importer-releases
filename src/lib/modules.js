@@ -61,6 +61,25 @@ function datesHtml(rec, tz) {
 // First date, for sorting (newest first).
 const sortDate = rec => { const it = fieldItems(rec, 'field_smart_date').find(x => x && x.value); return it ? isoDate(String(it.value)) : ''; };
 
+// When a dated record happens, for ordering: its next date that has not ended yet (upcoming), or else its
+// last date (past). Smart dates are Unix seconds; ISO strings work too. now: milliseconds.
+const toMs = v => (isUnix(v) ? Number(v) * 1000 : Date.parse(String(v || '')));
+function whenOf(rec, now) {
+  const items = fieldItems(rec, 'field_smart_date').filter(x => x && typeof x === 'object' && x.value)
+    .map(x => ({ start: toMs(x.value), end: toMs(x.end_value || x.value) })).filter(x => !isNaN(x.start));
+  if (!items.length) return { upcoming: false, at: NaN };
+  const next = items.filter(x => (isNaN(x.end) ? x.start : x.end) >= now).sort((a, b) => a.start - b.start)[0];
+  return next ? { upcoming: true, at: next.start } : { upcoming: false, at: Math.max(...items.map(x => x.start)) };
+}
+// Upcoming first (soonest first), then past (most recent first), then undated; ties by title.
+function upcomingFirst(a, b) {
+  if (a.upcoming !== b.upcoming) return a.upcoming ? -1 : 1;
+  const an = isNaN(a.at), bn = isNaN(b.at);
+  if (an !== bn) return an ? 1 : -1;
+  const d = an ? 0 : a.upcoming ? a.at - b.at : b.at - a.at;
+  return d || a.title.localeCompare(b.title);
+}
+
 // D10 link fields ({uri, title}) as a list.
 function linkListHtml(rec, names) {
   const items = [];
@@ -176,12 +195,19 @@ const MODULE_TYPES = Object.keys(MODULES);
 // Entries of one module type, in the order its listing page shows them.
 // Each: { key, type, nid, title, alias, published, bodyHtml, attachments, publishedAt, notes, micrositeIds }
 // opts.timeZone: the site's IANA time zone for date-times (default UTC).
+// opts.now: the time (ms) that splits upcoming from past events and meetings (default: now). Those are ordered
+// upcoming first, soonest first, then past ones, most recent first; the order is fixed when the plan is made.
 function moduleEntries(exp, type, opts) {
   const tz = (opts && opts.timeZone) || 'UTC';
   const def = MODULES[type];
   if (!def) throw new Error('Unknown module type ' + type);
   const ctx = moduleContext(exp);
   const newestFirst = (a, b) => (b.publishedAt || '').localeCompare(a.publishedAt || '') || a.title.localeCompare(b.title);
+  const now = opts && opts.now != null ? opts.now : Date.now();
+  const dated = def.filter ? type === 'events' : def.order === 'date_published';
+  const order = list => {
+    if (dated) { list.sort(upcomingFirst); for (const e of list) { delete e.upcoming; delete e.at; } } else list.sort(newestFirst);
+  };
   let entries;
   if (def.file === 'pages') {
     // News items and events are page records; their summaries (with sections) are already loaded.
@@ -194,10 +220,11 @@ function moduleEntries(exp, type, opts) {
         attachments: p.attachments, sections: p.sections || [], embeddedPages: p.embeddedPages || [], faqSections: p.faqSections || [],
         primaryMediaId: p.primaryMediaId || '',
         publishedAt: type === 'news' ? isoDate(firstValue(rec, 'field_news_date')) : sortDate(rec),
-        micrositeIds: p.micrositeIds, notes: p.notes.filter(n => !/attachments|sections|primary image/i.test(n))
+        micrositeIds: p.micrositeIds, notes: p.notes.filter(n => !/attachments|sections|primary image/i.test(n)),
+        ...(type === 'events' ? whenOf(rec, now) : {})
       };
     });
-    entries.sort(newestFirst);
+    order(entries);
     return entries;
   }
   entries = (exp.raw[def.file] || []).filter(r => r && r.fields).map(rec => {
@@ -218,10 +245,11 @@ function moduleEntries(exp, type, opts) {
       // For linking and ordering cards (see lib/plan.js).
       weight: Number(firstValue(rec, 'field_weight')) || 0, lastName: cleanTitle(firstValue(rec, 'field_last_name') || ''),
       groupTermIds: refIds(rec, 'field_directory_list_group'),
-      categoryId: refIds(rec, 'field_faq_category')[0] || ''
+      categoryId: refIds(rec, 'field_faq_category')[0] || '',
+      ...(dated ? whenOf(rec, now) : {})
     };
   });
-  if (def.order === 'date_published') entries.sort(newestFirst);
+  if (def.order === 'date_published') order(entries);
   else if (type === 'people') entries.sort((a, b) => (a.lastName || a.title).localeCompare(b.lastName || b.title, 'en', { sensitivity: 'base' }) || a.title.localeCompare(b.title));
   else entries.sort((a, b) => a.title.localeCompare(b.title, 'en', { sensitivity: 'base', numeric: true }));
   return entries;

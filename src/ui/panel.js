@@ -13,6 +13,8 @@ const { readSiteMap } = require('../lib/sitemap');
 const { matchSiteMap, parseOverrides, MATCH_COLUMNS } = require('../lib/match');
 const { faqReport, FAQ_COLUMNS, outOfScopeReport, OUT_OF_SCOPE_COLUMNS } = require('../lib/reports');
 const man = require('../lib/manifest');
+const hist = require('../lib/history');
+const { sampleExport, SAMPLE_LABEL } = require('../lib/sample');
 const { makeClient, browserTransport, ApiError, SANDBOX_HOST } = require('../api/client');
 const { streamlineApi } = require('../api/streamline');
 const { runPlan, undoRun, removeAllMenuItems, wipeSite, StopRequested } = require('../runner');
@@ -20,6 +22,7 @@ const { INTROSPECTION, toSdl, checkSchema } = require('../lib/schema');
 
 const RED = '#b3121b';
 const MANIFEST_KEY = () => 'streamline-importer-manifest:' + location.host;
+const HISTORY_KEY = () => 'streamline-importer-history:' + location.host;
 
 // The same user6 skip-report columns, so the user guide's description still fits.
 const SITEMAP_SKIPPED_COLUMNS = [
@@ -88,14 +91,25 @@ function filePicker(accept, multiple, folder, onFiles) {
   return i;
 }
 
-// ---------- Manifest storage ----------
-function loadStoredManifest() {
-  try { const t = localStorage.getItem(MANIFEST_KEY()); return t ? man.parseManifest(t, location.host) : null; } catch (e) { return null; }
+// ---------- Import history storage ----------
+// One manifest per import, so each batch can be undone on its own. Versions before 0.10 kept a single
+// manifest under MANIFEST_KEY; it is moved into the history the first time the panel opens.
+function loadHistory() {
+  let text = null, legacy = null;
+  try { text = localStorage.getItem(HISTORY_KEY()); legacy = localStorage.getItem(MANIFEST_KEY()); } catch (e) { return []; }
+  const list = hist.parseHistory(text, location.host, legacy);
+  if (legacy) { writeHistory(list); try { localStorage.removeItem(MANIFEST_KEY()); } catch (e) { /* storage unavailable */ } }
+  return list;
 }
+function writeHistory(list) {
+  try { localStorage.setItem(HISTORY_KEY(), hist.serialize(list)); } catch (e) { console.warn('[Importer] could not save the import history to localStorage', e); }
+}
+// Saves one import's manifest (after every step of a run or undo); a fully undone one leaves the history.
 function storeManifest(m) {
-  try { localStorage.setItem(MANIFEST_KEY(), JSON.stringify(m)); } catch (e) { console.warn('[Importer] could not save the manifest to localStorage', e); }
+  state.history = hist.upsert(state.history, m);
+  writeHistory(state.history);
 }
-function clearStoredManifest() { try { localStorage.removeItem(MANIFEST_KEY()); } catch (e) { /* storage unavailable */ } }
+function clearHistory() { state.history = []; state.manifest = null; writeHistory([]); }
 
 // ---------- State, kept while the tab stays open ----------
 const state = {
@@ -104,7 +118,9 @@ const state = {
   nav: null, match: null, plan: null, preview: null,
   // Everything the export has is imported unless unticked: content, and every module type.
   options: Object.assign({}, DEFAULT_OPTIONS, { unmatchedRows: 'empty-page', pageContent: 'content', modules: MODULE_TYPES.slice() }),
-  manifest: null, errors: []
+  // history: every import recorded in this browser for this site, oldest first.
+  // manifest: the import the next run continues (the one made from the loaded export), or null for a new one.
+  history: [], manifest: null, errors: []
 };
 let platform = {};
 
@@ -166,11 +182,22 @@ async function readWorkbook(file) {
   return Object.assign({ fileName: file.name }, readSiteMap(sheets));
 }
 
+// The loaded export continues the import made from it before (resume, retry failed files); any other
+// export becomes a new import. Resuming needs the same plan, so it starts from the options that import used.
+function pickImportForSource() {
+  state.manifest = state.exp ? hist.forSource(state.history, state.sourceLabel) : null;
+  if (state.manifest && state.manifest.options) Object.assign(state.options, state.manifest.options);
+}
+
+const importLine = m => {
+  const s = man.summary(m);
+  return (s.source || s.runId) + ' · started ' + String(m.createdAt).slice(0, 16).replace('T', ' ') + ' UTC · ' + s.pages + ' pages, ' + s.menuItems + ' menu items, ' + s.media + ' media';
+};
+
 function openPanel() {
   if (document.getElementById('si-overlay')) return;
-  state.manifest = loadStoredManifest();
-  // Resuming needs the same plan, so start from the options the recorded run used.
-  if (state.manifest && !man.isEmpty(state.manifest) && state.manifest.options) Object.assign(state.options, state.manifest.options);
+  state.history = loadHistory();
+  pickImportForSource();
   const overlay = h('div', null, 'position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:2147483646;display:flex;align-items:center;justify-content:center;font:14px/1.4 sans-serif;');
   overlay.id = 'si-overlay';
   const panel = h('div', null, 'background:#fff;color:#222;width:min(760px,94vw);max-height:90vh;overflow:auto;border-radius:6px;padding:20px;box-shadow:0 8px 30px rgba(0,0,0,.3);');
@@ -191,11 +218,10 @@ function openPanel() {
       const items = await a.menuItems(await a.menuIdFor('primary'));
       lines.push('Primary nav: ' + items.length + ' item(s) in the menu');
     } catch (e) { lines.push('Could not read the primary menu: ' + e.message); }
-    const m = state.manifest;
-    if (m && !man.isEmpty(m)) {
-      const s = man.summary(m);
-      lines.push('Run recorded in this browser: ' + (s.source || s.runId) + ' (' + s.pages + ' pages, ' + s.promoted + ' promoted, ' + s.menuItems + ' menu items, ' + s.media + ' media), last saved ' + s.updatedAt);
-    } else lines.push('No run recorded in this browser.');
+    const n = state.history.length;
+    if (n) {
+      lines.push(n + ' import' + (n === 1 ? '' : 's') + ' recorded in this browser. Last: ' + importLine(hist.last(state.history)));
+    } else lines.push('No imports recorded in this browser.');
     return lines.join('\n');
   }
 
@@ -219,14 +245,28 @@ function openPanel() {
         state.exp = d10.loadExport(files);
         state.idx = buildLinkIndex(state.exp);
         const first = list[0];
-        state.sourceLabel = (first.webkitRelativePath ? first.webkitRelativePath.split('/')[0] : 'selected files') + ' (' + files.length + ' files)';
+        // The label also tells imports apart (the same export continues its import), so files chosen without
+        // their folder are named after the old site they came from.
+        state.sourceLabel = (first.webkitRelativePath ? first.webkitRelativePath.split('/')[0] : (state.exp.hosts[0] || 'selected files')) + ' (' + files.length + ' files)';
       } catch (e) { state.exp = state.idx = null; summary.textContent = 'Could not read those files: ' + e.message; return; }
+      pickImportForSource();
       render();
     };
     const folder = filePicker('', true, true, onExport), files = filePicker('.json', true, false, onExport);
     panel.appendChild(folder); panel.appendChild(files);
     panel.appendChild(btn('Choose folder', () => folder.click(), true));
     panel.appendChild(btn('Choose files', () => files.click()));
+    // A made-up export that uses everything the importer does, to see what it makes; undo it afterwards.
+    panel.appendChild(btn('Use the sample site', () => {
+      state.exp = d10.loadExport(sampleExport(Date.now()));
+      state.idx = buildLinkIndex(state.exp);
+      state.sourceLabel = SAMPLE_LABEL;
+      state.siteMap = state.overrides = null;
+      if (state.options.menuSource === 'workbook') state.options.menuSource = 'd10';
+      pickImportForSource();
+      render();
+    }));
+    panel.appendChild(hint('No export to hand? "Use the sample site" loads a made-up town (Town of Maple Grove) with menus, pages, text, images, files, links between pages, page sections, every module type and right-column cards. Import it to see what the importer makes, then remove it with "Undo last import". Its images and files are made in the browser, so nothing is downloaded.'));
     panel.appendChild(summary);
 
     panel.appendChild(heading('Site map (optional)'));
@@ -257,10 +297,11 @@ function openPanel() {
         lines.push('Microsites: ' + e.microsites.length + ' · Media: ' + e.media.length + ' (' + e.media.filter(m => m.kind === 'file').length + ' files, ' + e.media.filter(m => m.kind === 'image').length + ' images)');
         lines.push('Old site: ' + (e.hosts.length ? e.hosts.join(', ') : 'not found (links to it cannot be recognised)'));
         const others = Object.entries(e.counts).filter(([k, v]) => v != null && !['pages', 'microsites', 'media'].includes(k)).map(([k, v]) => k + ' ' + v);
-        if (others.length) lines.push('Also loaded (reports only): ' + others.join(', '));
+        if (others.length) lines.push('Also loaded: ' + others.join(', '));
         const missing = Object.entries(e.counts).filter(([, v]) => v == null).map(([k]) => k);
         if (missing.length) lines.push('Not loaded: ' + missing.join(', '));
         if (e.errors.length) lines.push('\nProblems:\n• ' + e.errors.join('\n• '));
+        lines.push(state.manifest ? 'Imported here before (' + importLine(state.manifest) + '). Running again continues that import.' : 'Not imported here yet: running starts a new import, which can be undone on its own.');
         if (e.warnings.length) lines.push('\nWarnings (' + e.warnings.length + '):\n• ' + e.warnings.slice(0, 8).join('\n• ') + (e.warnings.length > 8 ? '\n• …' : ''));
         summary.textContent = lines.join('\n');
       }
@@ -283,6 +324,7 @@ function openPanel() {
       if (state.exp.errors.length) { msg.textContent = 'Fix the problems listed above first.'; return; }
       viewOptions();
     }, true));
+    if (state.history.length) foot.appendChild(btn('Undo last import…', () => viewManage({ undo: true })));
     foot.appendChild(btn('Resume, undo, other actions', () => viewManage()));
     foot.appendChild(btn('Erase this site…', () => viewManage({ erase: true })));
     foot.appendChild(btn('Close', close));
@@ -402,8 +444,9 @@ function openPanel() {
         ? 'Content: ' + [...pv.byKey.values()].filter(c => !c.empty).length + ' pages get their D10 body' + (o.includeAttachments ? ' and attachments' : '') + '; ' + (p.pages.length - [...pv.byKey.values()].filter(c => !c.empty || c.blocks.length).length) + ' stay empty (no content in D10).'
         : 'All pages are empty (title only).'
     ];
-    const lists = p.pages.filter(x => x.sourceType === 'listing');
-    if (lists.length) lines.push('Modules: ' + lists.map(l => l.title + ' (' + (l.cards[0] ? l.cards[0].keys.length : 0) + ')').join(', ') + '. Each entry is a page, listed as cards on its listing page' + (o.moduleMenu ? ', which gets a menu item' : '') + '.');
+    const lists = p.pages.filter(x => x.sourceType === 'listing' || x.listingOf);
+    const listCount = l => { const c = l.cards.find(x => x.column === 'main'); return c ? c.keys.length : 0; };
+    if (lists.length) lines.push('Modules: ' + lists.map(l => (l.listingOf ? MODULES[l.listingOf].label + ' (' + listCount(l) + ', listed on the "' + l.title + '" ' + l.sourceType + ')' : l.title + ' (' + listCount(l) + ')')).join(', ') + '. Each entry is a page, listed as cards on its listing page' + (o.moduleMenu ? ', which gets a menu item' : '') + '.');
     const cardPages = p.pages.filter(x => x.cards.some(c => c.column === 'gutter'));
     if (cardPages.length) lines.push('Right-column cards: ' + cardPages.reduce((s, x) => s + x.cards.filter(c => c.column === 'gutter').reduce((t, c) => t + c.keys.length, 0), 0) + ' on ' + cardPages.length + ' page(s).');
     if (p.cardIssues.length) lines.push('Right-column links that cannot become cards: ' + p.cardIssues.length + ' (see the card report).');
@@ -437,7 +480,8 @@ function openPanel() {
     const navWarn = state.nav ? state.nav.warnings : [];
     if (navWarn.length) lines.push('\nWarnings (' + navWarn.length + '):\n• ' + navWarn.slice(0, 6).join('\n• ') + (navWarn.length > 6 ? '\n• … (all in the warnings file)' : ''));
     const m = state.manifest;
-    if (m && !man.isEmpty(m)) lines.push('\nA run is recorded in this browser. Running again resumes it: only what is missing is created.');
+    if (m && !man.isEmpty(m)) lines.push('\nThis export was imported here before. Running again continues that import: only what is missing is created.');
+    else if (state.history.length) lines.push('\nThis is a new import. The ' + state.history.length + ' earlier import(s) recorded here are left as they are, and each can still be undone on its own.');
     panel.appendChild(box()).textContent = lines.join('\n');
 
     panel.appendChild(heading('Menu tree'));
@@ -500,7 +544,7 @@ function openPanel() {
       'Create ' + p.pages.length + ' pages (InteriorStandard layout)',
       'Create ' + p.menu.length + ' primary menu items linked to those pages'
     ];
-    if (p.media.length) steps.push('Download ' + p.media.length + ' files and images from the old site and upload them');
+    if (p.media.length) steps.push(state.sourceLabel === SAMPLE_LABEL ? 'Make the ' + p.media.length + ' sample images and documents in the browser and upload them' : 'Download ' + p.media.length + ' files and images from the old site and upload them');
     if (o.pageContent === 'content' || o.modules.length) steps.push('Write each page\'s converted content, with links pointing at the new pages and media');
     const cardSecs = p.pages.reduce((n, x) => n + x.cards.length, 0);
     if (cardSecs) steps.push('Add ' + cardSecs + ' sections of link cards (module listing pages and right-column cards)');
@@ -528,6 +572,7 @@ function openPanel() {
   }
 
   // ---- Progress (run, undo, remove all) ----
+  // wipeOpts: the erase options for 'wipe', or the import's manifest for 'undo'.
   function viewProgress(kind, wipeOpts) {
     clear();
     title(kind === 'run' ? 'Running' : kind === 'undo' ? 'Undoing' : kind === 'wipe' ? 'Erasing ' + location.host : 'Removing all primary items');
@@ -551,7 +596,7 @@ function openPanel() {
     drawLive();
     const log = msg => {
       logBox.textContent += msg + '\n'; logBox.scrollTop = logBox.scrollHeight; console.log('[Importer] ' + msg);
-      if (/^Phase /.test(msg)) status(msg);
+      if (/^(Phase |Removing |Undoing )/.test(msg)) status(msg);
       else lastChange = Date.now();
     };
     let stop = false;
@@ -598,8 +643,15 @@ function openPanel() {
           done(true);
         }, fail);
     } else if (kind === 'undo') {
-      undoRun({ api: a, manifest: state.manifest, save, log })
-        .then(() => { clearStoredManifest(); log('✓ Removed everything this run created'); done(true); }, fail);
+      const target = wipeOpts;
+      log('Undoing ' + importLine(target));
+      undoRun({ api: a, manifest: target, save, log })
+        .then(() => {
+          state.history = hist.remove(state.history, target.runId); writeHistory(state.history);
+          if (state.manifest && state.manifest.runId === target.runId) state.manifest = null;
+          log('✓ Removed everything this import created. ' + (state.history.length ? state.history.length + ' earlier import(s) are left as they are.' : 'No other imports are recorded.'));
+          done(true);
+        }, fail);
     } else if (kind === 'removeAll') {
       removeAllMenuItems(a, 'primary', snap => saveFile(JSON.stringify(snap, null, 2), 'snapshot-primary-' + stamp() + '.json'), log)
         .then(() => { log('✓ Primary menu is empty'); done(true); }, fail);
@@ -607,7 +659,7 @@ function openPanel() {
       wipeSite(a, wipeOpts, { log, shouldStop: () => stop, host: location.host, snapshot: snap => saveFile(JSON.stringify(snap, null, 2), 'erase-snapshot-' + location.host.replace(/[^\w.-]+/g, '_') + '-' + stamp() + '.json') })
         .then(s => {
           // Everything a recorded run made is gone too, so its manifest no longer means anything here.
-          clearStoredManifest(); state.manifest = null;
+          clearHistory();
           log('✓ Erased: ' + s.menuItems + ' menu items, ' + s.pages + ' pages' + (wipeOpts.media ? ', ' + s.files + ' files, ' + s.images + ' images' : '') + '. The homepage stays.');
           done(true);
         }, fail);
@@ -625,31 +677,49 @@ function openPanel() {
     panel.appendChild(status);
     const msg = h('div', '', 'margin-top:8px;color:' + RED + ';font-weight:600;white-space:pre-line;');
 
-    panel.appendChild(heading('Manifest'));
-    panel.appendChild(hint('The manifest lists every page, menu item and media file a run created. It is saved in this browser automatically. Download it to keep a copy, or load one to resume or undo a run from another browser.'));
+    const download = m => saveFile(JSON.stringify(m, null, 2), 'manifest-' + location.host + '-' + (hist.sourceOf(m).replace(/\s*\(.*$/, '').replace(/[^\w.-]+/g, '_') || m.runId) + '-' + stamp() + '.json');
+    const undo = (m, label) => {
+      const s = man.summary(m);
+      if (confirmChange(label + ': remove the ' + s.menuItems + ' menu items, ' + s.pages + ' pages and ' + s.media + ' uploaded files made by "' + (s.source || s.runId) + '"? Other imports are left alone.')) viewProgress('undo', m);
+    };
+
+    // ---- Undo: every import recorded here, newest first ----
+    const undoBox = h('div', null, 'margin-top:14px;' + (opts && opts.undo ? 'border:2px solid #2760b0;border-radius:4px;padding:8px 10px;' : ''));
+    panel.appendChild(undoBox);
+    undoBox.appendChild(heading('Undo an import'));
+    const imports = hist.newestFirst(state.history);
+    if (!imports.length) undoBox.appendChild(hint('No imports recorded in this browser, so there is nothing to undo.'));
+    else {
+      undoBox.appendChild(hint('Each import (each export you ran) is recorded separately. Undoing one removes only the menu items, pages and uploaded files that import made; earlier and later imports stay. Running the same export again continues its import instead of starting a new one.'));
+      undoBox.appendChild(btn('Undo last import', () => undo(imports[0], 'Undo last import'), true));
+      const ol = h('ol', null, 'margin:10px 0 0;padding-left:20px;font-size:13px;');
+      imports.forEach((m, i) => {
+        const li = h('li', null, 'margin:0 0 6px;');
+        li.appendChild(h('div', (i === 0 ? 'Last: ' : '') + importLine(m)));
+        li.appendChild(btn('Undo this import', () => undo(m, 'Undo import')));
+        li.appendChild(btn('Download manifest', () => download(m)));
+        ol.appendChild(li);
+      });
+      undoBox.appendChild(ol);
+    }
+    if (opts && opts.undo) setTimeout(() => undoBox.scrollIntoView({ block: 'start' }), 0);
+
+    panel.appendChild(heading('Manifests'));
+    panel.appendChild(hint('Each import\'s manifest lists every page, menu item and media file it created, and is saved in this browser after every step. Download one to keep a copy, or load one to resume or undo an import from another browser.'));
     const up = filePicker('.json', false, false, async list => {
       try {
         const m = man.parseManifest(await list[0].text(), location.host);
-        if (state.manifest && !man.isEmpty(state.manifest) && !confirm('Replace the run recorded in this browser with the loaded manifest?')) return;
-        state.manifest = m; storeManifest(m);
-        if (m.options) Object.assign(state.options, m.options);
+        if (state.history.some(x => x.runId === m.runId) && !confirm('Replace this import\'s record in this browser with the loaded manifest?')) return;
+        storeManifest(m);
+        pickImportForSource();
         viewManage();
       } catch (e) { msg.textContent = 'Could not use that manifest: ' + e.message; }
     });
     panel.appendChild(up);
-    if (state.manifest) panel.appendChild(btn('Download manifest', () => saveFile(JSON.stringify(state.manifest, null, 2), 'manifest-' + location.host + '-' + stamp() + '.json')));
     panel.appendChild(btn('Load a manifest', () => up.click()));
 
     panel.appendChild(heading('Resume'));
-    panel.appendChild(hint('Load the same export (and site map) and run again with the same options: only what is missing gets created.'));
-
-    panel.appendChild(heading('Undo'));
-    const hasRun = state.manifest && !man.isEmpty(state.manifest);
-    panel.appendChild(hint(hasRun ? 'Removes the menu items, pages and uploaded media listed in the manifest, and nothing else.' : 'No run recorded, so there is nothing to undo.'));
-    if (hasRun) panel.appendChild(btn('Undo this run', () => {
-      const s = man.summary(state.manifest);
-      if (confirmChange('Remove ' + s.menuItems + ' menu items, ' + s.pages + ' pages and ' + s.media + ' media created by this run?')) viewProgress('undo');
-    }, true));
+    panel.appendChild(hint('Load the same export (and site map) and run again with the same options: only what is missing gets created, and files that failed to download are tried again.'));
 
     panel.appendChild(heading('Developer'));
     panel.appendChild(hint('Reads the CMS API schema (read-only, nothing changes) and saves schema.graphql and schema-check.txt. Put both in the repo\'s docs folder.'));

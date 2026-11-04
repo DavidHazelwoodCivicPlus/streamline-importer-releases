@@ -6,6 +6,8 @@ const { openPanel, setPlatform } = require('./ui/panel');
 const { SANDBOX_HOST } = require('./api/client');
 const { parseSiteList, isEnabled, withSite, withoutSite } = require('./lib/sites');
 const { makeDockItem } = require('./ui/dock');
+const { isSampleUrl } = require('./lib/sample');
+const { sampleFile } = require('./ui/sampleFiles');
 
 /* global GM_xmlhttpRequest, GM_getResourceText */
 // Old-site files are on another domain, so they are fetched with GM_xmlhttpRequest (@connect in the header).
@@ -49,7 +51,10 @@ function loadXlsx() {
   return xlsx;
 }
 
-setPlatform({ download, storagePut, loadXlsx });
+// The sample site's files are made here rather than downloaded (its old site does not exist).
+const getFile = (url, opts) => (isSampleUrl(url) ? sampleFile(url) : download(url, opts));
+
+setPlatform({ download: getFile, storagePut, loadXlsx });
 
 const LOG = '[Importer] ';
 const DOCK_CSS = 'display:block;width:calc(100% - 16px);margin:12px 8px;padding:8px 6px;background:#fff;color:#b3121b;border:0;border-radius:4px;font:600 13px/1.2 sans-serif;cursor:pointer;';

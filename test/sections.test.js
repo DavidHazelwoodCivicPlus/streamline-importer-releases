@@ -140,3 +140,32 @@ test('a meeting short description that repeats the body is shown once', () => {
   const meet = moduleEntries(exp, 'meetings', {})[0];
   assert.equal((meet.bodyHtml.match(/Regular meeting\./g) || []).length, 1);
 });
+
+test('a microsite named like a listing page becomes that listing, with no second menu item', () => {
+  const exp = site();
+  exp.raw.microsites.push(microsite(20, 'Events', '/events'));
+  const again = d10.loadExport([
+    { name: 'www-pages.json', text: JSON.stringify(exp.raw.pages.concat([page(103, 'Calendar intro', 20)])) },
+    { name: 'www-microsites.json', text: JSON.stringify(exp.raw.microsites) },
+    { name: 'www-directory_listings.json', text: JSON.stringify(exp.raw.directory_listings) }, { name: 'www-meetings.json', text: JSON.stringify(exp.raw.meetings) },
+    { name: 'www-faqs.json', text: JSON.stringify(exp.raw.faqs) }, { name: 'www-media.json', text: JSON.stringify(exp.raw.media) }
+  ]);
+  const { p } = plan({ modules: ALL }, again);
+  assert.equal(p.menu.filter(m => m.level === 1 && m.title === 'Events').length, 1, 'one Events menu item');
+  assert.ok(!p.pages.some(x => x.key === 'list:events'), 'no separate listing page');
+  const host = p.pages.find(x => x.key === 'microsite:20');
+  assert.deepEqual(host.cards.filter(c => c.column === 'main').map(c => c.keys), [['events:102']]);
+  assert.ok(!host.cards.some(c => c.column === 'gutter' && c.title === 'Events'), 'no right-column copy of the same events');
+  assert.ok(p.menu.some(m => m.title === 'Meetings'), 'other listings keep their own menu item');
+});
+
+test('events and meetings list upcoming ones first (soonest first), then past ones (most recent first)', () => {
+  const day = d => String(Date.UTC(2026, 10, d) / 1000);
+  const ev = (nid, title, dates) => page(nid, title, 10, { fields: { field_smart_date: dates.map(d => ({ value: day(d), end_value: day(d) })) } });
+  const exp = d10.loadExport([
+    { name: 'www-pages.json', text: JSON.stringify([ev(1, 'Far future', [30]), ev(2, 'Soon', [12]), ev(3, 'Recent past', [3]), ev(4, 'Old past', [1]), ev(5, 'Weekly', [2, 9, 16])]) },
+    { name: 'www-microsites.json', text: JSON.stringify([microsite(10, 'Parks', '/parks')]) }
+  ]);
+  const now = Date.UTC(2026, 10, 5);
+  assert.deepEqual(moduleEntries(exp, 'events', { now }).map(e => e.title), ['Weekly', 'Soon', 'Far future', 'Recent past', 'Old past']);
+});
